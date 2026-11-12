@@ -480,15 +480,17 @@ export function TjDetailPanel({
                                       className="flex items-center justify-between text-[10px] bg-background/50 rounded-lg px-2 py-1 border border-border/50"
                                     >
                                       <div className="flex items-center gap-1.5">
-                                        <span
-                                          className="size-2 rounded-full shrink-0"
-                                          style={{ backgroundColor: uf.color }}
-                                        />
+                                        <Cable className="size-3 text-sky-500 shrink-0" />
                                         <span className="font-medium">{uf.label}</span>
                                         <span className="text-muted-foreground font-mono">({uf.coreCount}F)</span>
                                       </div>
                                       {splicedCore ? (
-                                        <span className="text-sky-600 dark:text-sky-400 font-semibold text-[9.5px]">
+                                        <span className="flex items-center gap-1 text-sky-600 dark:text-sky-400 font-semibold text-[9.5px]">
+                                          <span
+                                            className="size-2 rounded-full border border-white/60 dark:border-white/20 shrink-0"
+                                            style={{ backgroundColor: splicedCore.color }}
+                                            title={`Core colour: ${splicedCore.color}`}
+                                          />
                                           ⚡ Spliced: {splicedCore.label}
                                         </span>
                                       ) : (

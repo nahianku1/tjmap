@@ -650,6 +650,46 @@ export function TjFormDialog({
     patch({ userFibres: updatedFibres });
   }
 
+  function handleUpdateUserCore(
+    userFibreId: string,
+    coreIndex: number,
+    patchVal: Partial<UserFibreCore>,
+  ) {
+    const targetFibre = form.userFibres.find((uf) => uf.id === userFibreId);
+    const outputCoreLabel = targetFibre?.outputCoreLabel;
+
+    const updatedUserFibres = form.userFibres.map((uf) => {
+      if (uf.id !== userFibreId) return uf;
+      const updatedCores = uf.cores.map((c) => {
+        if (c.coreIndex === coreIndex) {
+          return { ...c, ...patchVal };
+        }
+        return c;
+      });
+      return {
+        ...uf,
+        cores: updatedCores,
+      };
+    });
+
+    let updatedOutputCores = form.outputCores;
+    if (patchVal.label && outputCoreLabel) {
+      const isThisCoreConnected = targetFibre?.cores.find(
+        (c) => c.coreIndex === coreIndex,
+      )?.connectedToOutputCore;
+      if (isThisCoreConnected) {
+        updatedOutputCores = form.outputCores.map((oc) =>
+          oc.label === outputCoreLabel ? { ...oc, connectedUserCoreLabel: patchVal.label } : oc,
+        );
+      }
+    }
+
+    patch({
+      userFibres: updatedUserFibres,
+      outputCores: updatedOutputCores,
+    });
+  }
+
   function handleConnectUserCore(userFibreId: string, coreIndex: number) {
     const targetFibre = form.userFibres.find((uf) => uf.id === userFibreId);
     if (!targetFibre) return;
@@ -1514,20 +1554,9 @@ export function TjFormDialog({
                               {/* User Fibre Header */}
                               <div className="flex flex-wrap items-center justify-between gap-2">
                                 <div className="flex items-center gap-2 flex-1 min-w-[180px]">
-                                  <label
-                                    className="relative size-6 shrink-0 cursor-pointer rounded-md border border-white/70 shadow-inner dark:border-white/20"
-                                    style={{ backgroundColor: uf.color }}
-                                    title="User fibre cable sheath colour"
-                                  >
-                                    <input
-                                      type="color"
-                                      value={uf.color}
-                                      onChange={(e) =>
-                                        handleUpdateUserFibre(uf.id, { color: e.target.value })
-                                      }
-                                      className="absolute inset-0 size-full cursor-pointer opacity-0"
-                                    />
-                                  </label>
+                                  <div className="grid size-7 place-items-center rounded-lg bg-sky-500/10 text-sky-600 dark:text-sky-400 shrink-0">
+                                    <Cable className="size-3.5" />
+                                  </div>
 
                                   <div className="flex items-center gap-1.5 flex-1">
                                     <input
@@ -1618,17 +1647,41 @@ export function TjFormDialog({
                                           : 'border-border/60 bg-background/50 hover:bg-background/80',
                                       )}
                                     >
-                                      <div className="flex items-center gap-1.5 min-w-0">
-                                        <span
-                                          className="size-2.5 rounded-full shrink-0 shadow-sm"
+                                      <div className="flex items-center gap-1.5 min-w-0 flex-1">
+                                        {/* Edit Core Color with Picker */}
+                                        <label
+                                          className="relative size-6 shrink-0 cursor-pointer rounded-lg border border-white/80 shadow-sm transition hover:scale-105 active:scale-95 dark:border-white/30"
                                           style={{ backgroundColor: uCore.color }}
+                                          title={`Click to edit colour for ${uCore.label}`}
+                                        >
+                                          <input
+                                            type="color"
+                                            value={uCore.color}
+                                            onChange={(e) =>
+                                              handleUpdateUserCore(uf.id, uCore.coreIndex, {
+                                                color: e.target.value,
+                                              })
+                                            }
+                                            className="absolute inset-0 size-full cursor-pointer opacity-0"
+                                            aria-label={`Colour for ${uCore.label}`}
+                                          />
+                                        </label>
+
+                                        <input
+                                          value={uCore.label}
+                                          onChange={(e) =>
+                                            handleUpdateUserCore(uf.id, uCore.coreIndex, {
+                                              label: e.target.value,
+                                            })
+                                          }
+                                          placeholder="Core name"
+                                          className="h-6 w-20 rounded border border-transparent bg-transparent px-1 font-mono text-[11px] font-semibold outline-none transition focus:border-primary/40 focus:bg-background"
+                                          title="Click to rename core"
                                         />
-                                        <span className="font-mono text-[11px] font-semibold truncate">
-                                          {uCore.label}
-                                        </span>
+
                                         <span
                                           className={cn(
-                                            'text-[9px] font-semibold rounded px-1 py-0.2',
+                                            'text-[9px] font-semibold rounded px-1 py-0.2 shrink-0',
                                             isConnected
                                               ? 'text-sky-600 dark:text-sky-400 bg-sky-500/15'
                                               : 'text-emerald-600 dark:text-emerald-400 bg-emerald-500/15',
