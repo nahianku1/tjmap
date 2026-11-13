@@ -151,7 +151,7 @@ export default function HomePage() {
                 </h1>
                 <p className="mt-2 max-w-xl text-[12.5px] leading-relaxed text-muted-foreground sm:text-sm">
                   Open a district to see its areas, then jump into the live FTTH map for that area with
-                  every joint, span and fibre cut in place.
+                  every joint, link and fibre cut in place.
                 </p>
               </div>
 
@@ -300,7 +300,7 @@ export default function HomePage() {
                       <div className="mt-3 flex items-center justify-between text-[10px] text-muted-foreground">
                         <span className="inline-flex items-center gap-1.5">
                           <Cable className="size-3" />
-                          {district.linkCount} spans
+                          {district.linkCount} links
                         </span>
                         <span className="inline-flex items-center gap-1 font-semibold text-primary transition-all duration-300 group-hover:gap-1.5">
                           Open areas
@@ -353,7 +353,7 @@ export default function HomePage() {
               <div>
                 <p className="font-display text-[13px] font-semibold">Need the whole country?</p>
                 <p className="text-[11px] text-muted-foreground">
-                  The national map still shows every district, area and backbone span at once.
+                  The national map still shows every district, area and backbone link at once.
                 </p>
               </div>
             </div>

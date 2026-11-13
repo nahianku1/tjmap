@@ -17,6 +17,7 @@ import {
   Scissors,
   ShieldAlert,
   ShieldCheck,
+  Server,
   Split,
   Trash2,
   Wrench,
@@ -36,6 +37,7 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Separator } from '@/components/ui/separator';
 import type { FibreLink, Tj } from '@/lib/types';
+import { CorePatchLine, linkPatches, type CorePatch } from '@/components/map/core-patch-line';
 import { cn, formatDistance, totalCores } from '@/lib/utils';
 import { assessOpticalPower, getSplitterLossDb } from '@/lib/optical';
 
@@ -46,7 +48,6 @@ interface TjDetailPanelProps {
   onClose: () => void;
   onEdit: (tj: Tj) => void;
   onLinkFrom: (tj: Tj) => void;
-  onManageCut: (tj: Tj) => void;
   onDelete: (tj: Tj) => void;
   onSelectLink: (link: FibreLink) => void;
 }
@@ -58,7 +59,6 @@ export function TjDetailPanel({
   onClose,
   onEdit,
   onLinkFrom,
-  onManageCut,
   onDelete,
   onSelectLink,
 }: TjDetailPanelProps) {
@@ -68,6 +68,12 @@ export function TjDetailPanel({
     if (!tj) return [];
     return links.filter((link) => link.fromTjId === tj.id || link.toTjId === tj.id);
   }, [tj, links]);
+
+  /** For each core of this joint, the link patched to it and the device at its far end. */
+  const corePatches = useMemo<Map<string, CorePatch>>(
+    () => (tj ? linkPatches(spans, { kind: 'tj', id: tj.id }) : new Map()),
+    [spans, tj],
+  );
 
   const total = tj ? totalCores(tj) : 0;
   const outputCoresCount =
@@ -120,7 +126,7 @@ export function TjDetailPanel({
                 ) : (
                   <Badge variant="active" className="gap-1">
                     <Box className="size-2.5" />
-                    Normal Box TJ
+                    Splitter TJ
                   </Badge>
                 )}
 
@@ -239,6 +245,35 @@ export function TjDetailPanel({
                 </div>
               ) : null}
 
+              {/* OLT LINK */}
+              {tj.olt ? (
+                <div className="anim-rise rounded-2xl border border-sky-500/30 bg-sky-500/[0.06] p-3 space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="inline-flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-sky-700 dark:text-sky-300">
+                      <Server className="size-3.5" />
+                      OLT · {tj.olt.code}
+                    </p>
+                    <span className="font-mono text-[10px] text-muted-foreground">
+                      {tj.olt.name}
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2 text-[11px]">
+                    <div className="rounded-xl border border-white/60 bg-white/60 p-2 dark:border-white/10 dark:bg-white/[0.03]">
+                      <p className="text-[9px] uppercase tracking-wider text-muted-foreground">PON port</p>
+                      <p className="truncate font-mono font-semibold">
+                        {tj.olt.ponPort ?? tj.ponData?.ponPort ?? '—'}
+                      </p>
+                    </div>
+                    <div className="rounded-xl border border-white/60 bg-white/60 p-2 dark:border-white/10 dark:bg-white/[0.03]">
+                      <p className="text-[9px] uppercase tracking-wider text-muted-foreground">Uplink port</p>
+                      <p className="truncate font-mono font-semibold">
+                        {tj.olt.uplinkPort ?? '—'}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              ) : null}
+
               {/* HIGH LEVEL METRICS */}
               <div className="grid grid-cols-2 gap-2">
                 <Metric
@@ -247,7 +282,7 @@ export function TjDetailPanel({
                   icon={Radio}
                   accent="text-teal-500"
                 />
-                <Metric label="Connected spans" value={String(spans.length)} icon={Cable} accent="text-sky-500" />
+                <Metric label="Connected links" value={String(spans.length)} icon={Cable} accent="text-sky-500" />
                 <Metric
                   label="Input power"
                   value={
@@ -368,12 +403,13 @@ export function TjDetailPanel({
                     {tj.cores.map((core, index) => {
                       const isFree = core.status === 'free';
                       const isDamaged = core.status === 'damaged';
+                      const patch = corePatches.get(core.label);
 
                       return (
                         <div
                           key={`${core.label}-${index}`}
                           className={cn(
-                            'flex items-center gap-2.5 rounded-xl border px-2.5 py-2 transition-colors',
+                            'rounded-xl border px-2.5 py-2 transition-colors',
                             isFree
                               ? 'border-emerald-500/25 bg-emerald-500/[0.04]'
                               : isDamaged
@@ -381,36 +417,46 @@ export function TjDetailPanel({
                                 : 'border-white/60 bg-white/45 dark:border-white/10 dark:bg-white/[0.03]',
                           )}
                         >
-                          <span
-                            className="size-3 shrink-0 rounded-full border border-white/70 shadow-[0_0_10px] dark:border-slate-900"
-                            style={{ backgroundColor: core.color, color: core.color }}
-                          />
-                          <span className="min-w-0 flex-1 truncate text-[11.5px] font-medium">{core.label}</span>
+                          <div className="flex items-center gap-2.5">
+                            <span
+                              className="size-3 shrink-0 rounded-full border border-white/70 shadow-[0_0_10px] dark:border-slate-900"
+                              style={{ backgroundColor: core.color, color: core.color }}
+                            />
+                            <span className="min-w-0 flex-1 truncate text-[11.5px] font-medium">{core.label}</span>
 
-                          {/* Free vs In Use chip */}
-                          <span
-                            className={cn(
-                              'inline-flex items-center rounded-md px-1.5 py-0.5 text-[9.5px] font-semibold',
-                              isFree
-                                ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300'
-                                : isDamaged
-                                  ? 'bg-rose-500/15 text-rose-700 dark:text-rose-300'
-                                  : 'bg-sky-500/10 text-sky-700 dark:text-sky-300',
-                            )}
-                          >
-                            {isFree ? 'Free' : isDamaged ? 'Cut' : 'In Use'}
-                          </span>
-
-                          {core.powerDbm !== null && core.powerDbm !== undefined ? (
-                            <span className="font-mono text-[10px] text-amber-600 dark:text-amber-400">
-                              {core.powerDbm} dBm
+                            {/* Free vs In Use chip */}
+                            <span
+                              className={cn(
+                                'inline-flex items-center rounded-md px-1.5 py-0.5 text-[9.5px] font-semibold',
+                                isFree
+                                  ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300'
+                                  : isDamaged
+                                    ? 'bg-rose-500/15 text-rose-700 dark:text-rose-300'
+                                    : 'bg-sky-500/10 text-sky-700 dark:text-sky-300',
+                              )}
+                            >
+                              {isFree ? 'Free' : isDamaged ? 'Cut' : 'In Use'}
                             </span>
-                          ) : null}
 
-                          {core.count > 1 ? (
-                            <span className="rounded-md bg-muted px-1.5 py-0.5 font-mono text-[10px] font-semibold text-muted-foreground">
-                              {core.count}×
-                            </span>
+                            {core.powerDbm !== null && core.powerDbm !== undefined ? (
+                              <span className="font-mono text-[10px] text-amber-600 dark:text-amber-400">
+                                {core.powerDbm} dBm
+                              </span>
+                            ) : null}
+
+                            {core.count > 1 ? (
+                              <span className="rounded-md bg-muted px-1.5 py-0.5 font-mono text-[10px] font-semibold text-muted-foreground">
+                                {core.count}×
+                              </span>
+                            ) : null}
+                          </div>
+
+                          {patch ? (
+                            <CorePatchLine
+                              localCode={tj.code}
+                              localCore={core.label}
+                              patch={patch}
+                            />
                           ) : null}
                         </div>
                       );
@@ -434,6 +480,7 @@ export function TjDetailPanel({
                     {(tj.outputCores && tj.outputCores.length > 0 ? tj.outputCores : tj.splitter?.outputs ?? []).map(
                       (core, index) => {
                         const isFree = core.status === 'free';
+                        const patch = corePatches.get(core.label);
                         const attachedFibres =
                           tj.userFibres?.filter((uf) => uf.outputCoreLabel === core.label) ?? [];
 
@@ -466,6 +513,14 @@ export function TjDetailPanel({
                                 </span>
                               ) : null}
                             </div>
+
+                            {patch ? (
+                              <CorePatchLine
+                                localCode={tj.code}
+                                localCore={core.label}
+                                patch={patch}
+                              />
+                            ) : null}
 
                             {/* Attached User Fibres summary in detail panel */}
                             {attachedFibres.length > 0 ? (
@@ -511,18 +566,18 @@ export function TjDetailPanel({
                 </section>
               ) : null}
 
-              {/* CONNECTED SPANS */}
+              {/* CONNECTED LINKS */}
               <section>
                 <Separator className="mb-3" />
                 <div className="mb-2 flex items-end justify-between">
                   <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-muted-foreground">
-                    Connected spans
+                    Connected links
                   </p>
                   <span className="font-mono text-[10px] text-muted-foreground">{spans.length}</span>
                 </div>
                 {spans.length === 0 ? (
                   <p className="rounded-xl border border-dashed border-border px-3 py-4 text-center text-[11px] text-muted-foreground">
-                    No fibre spans linked yet.
+                    No fibre links yet.
                   </p>
                 ) : (
                   <div className="space-y-1.5">
@@ -593,15 +648,6 @@ export function TjDetailPanel({
                 <Button size="sm" variant="subtle" onClick={() => onLinkFrom(tj)}>
                   <Link2 className="size-3.5" />
                   Link
-                </Button>
-                <Button
-                  size="sm"
-                  variant="subtle"
-                  onClick={() => onManageCut(tj)}
-                  className={cn(tj.isCut && 'border-rose-400/40 text-rose-500')}
-                >
-                  <Scissors className="size-3.5" />
-                  Cut
                 </Button>
                 <Button
                   size="icon-sm"

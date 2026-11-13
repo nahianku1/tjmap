@@ -12,7 +12,7 @@ const FEATURES = [
   },
   {
     icon: Network,
-    title: 'Span-level control',
+    title: 'Link-level control',
     body: 'Cores, splitters, fibre IDs and cuts tracked end to end.',
   },
   {
@@ -49,7 +49,7 @@ export function AuthShell({ children }: { children: React.ReactNode }) {
             </h1>
             <p className="mt-4 max-w-md text-sm leading-relaxed text-muted-foreground">
               Survey, document and protect your FTTH footprint across Bangladesh — cores, splitters,
-              fibre spans and cable cuts in a single operational view.
+              fibre links and cable cuts in a single operational view.
             </p>
           </div>
 
@@ -125,7 +125,7 @@ export function AuthShell({ children }: { children: React.ReactNode }) {
               <div className="mt-1 grid grid-cols-3 gap-2 border-t border-white/50 pt-3 dark:border-white/10">
                 {[
                   { value: '21', label: 'Terminal joints' },
-                  { value: '24', label: 'Fibre spans' },
+                  { value: '24', label: 'Fibre links' },
                   { value: '2', label: 'Active cuts' },
                 ].map((stat) => (
                   <div key={stat.label} className="px-1">

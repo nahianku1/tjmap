@@ -208,7 +208,7 @@ export default function DistrictPage() {
               <div className="relative mt-5 grid grid-cols-2 gap-2 sm:grid-cols-4">
                 <Stat label="Areas" value={data.areaCount} icon={Layers} tone="text-primary" />
                 <Stat label="Joints" value={data.tjCount} icon={Waypoints} tone="text-sky-500" />
-                <Stat label="Spans" value={data.linkCount} icon={Cable} tone="text-teal-500" />
+                <Stat label="Links" value={data.linkCount} icon={Cable} tone="text-teal-500" />
                 <Stat
                   label="Cuts"
                   value={data.cutCount}

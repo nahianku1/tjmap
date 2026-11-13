@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   Activity,
   AlertTriangle,
@@ -51,6 +51,7 @@ import type {
   CoreStatus,
   CutRepairStatus,
   CutSeverity,
+  Olt,
   Tj,
   TjInput,
   TjType,
@@ -73,6 +74,7 @@ interface TjFormDialogProps {
   draftPoint?: { lat: number; lng: number } | null;
   draftAddress?: string | null;
   defaultAreaId?: string | null;
+  createTjType?: 'box' | 'cut' | null;
   onSaved: (tj: Tj, mode: 'create' | 'update') => void;
 }
 
@@ -127,7 +129,7 @@ interface FormState {
   repairStatus: CutRepairStatus;
   restorationNotes: string;
   // PON power details
-  oltName: string;
+  oltId: string;
   ponPort: string;
   wavelength: string;
   areaId: string;
@@ -161,8 +163,8 @@ const EMPTY_FORM: FormState = {
   restoredCores: '0',
   repairStatus: 'cut_unresolved',
   restorationNotes: '',
-  oltName: 'OLT-Main-01',
-  ponPort: 'GPON 0/1/1',
+  oltId: 'none',
+  ponPort: '',
   wavelength: '1490nm (GPON Downstream)',
   areaId: 'none',
 };
@@ -174,10 +176,12 @@ export function TjFormDialog({
   draftPoint,
   draftAddress,
   defaultAreaId,
+  createTjType,
   onSaved,
 }: TjFormDialogProps) {
   const [form, setForm] = useState<FormState>(EMPTY_FORM);
   const [areas, setAreas] = useState<Area[]>([]);
+  const [olts, setOlts] = useState<Olt[]>([]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [splitterError, setSplitterError] = useState<string | null>(null);
@@ -185,14 +189,11 @@ export function TjFormDialog({
   useEffect(() => {
     if (!open) return;
     let cancelled = false;
-    api
-      .areas()
-      .then((list) => {
-        if (!cancelled) setAreas(list);
-      })
-      .catch(() => {
-        if (!cancelled) setAreas([]);
-      });
+    Promise.allSettled([api.areas(), api.olts()]).then((results) => {
+      if (cancelled) return;
+      setAreas(results[0].status === 'fulfilled' ? results[0].value : []);
+      setOlts(results[1].status === 'fulfilled' ? results[1].value : []);
+    });
     return () => {
       cancelled = true;
     };
@@ -247,14 +248,17 @@ export function TjFormDialog({
         restoredCores: initial.cutData?.restoredCores ? String(initial.cutData.restoredCores) : '0',
         repairStatus: initial.cutData?.repairStatus ?? 'cut_unresolved',
         restorationNotes: initial.cutData?.restorationNotes ?? '',
-        oltName: initial.ponData?.oltName ?? 'OLT-Main-01',
-        ponPort: initial.ponData?.ponPort ?? 'GPON 0/1/1',
+        oltId: initial.oltId ?? 'none',
+        ponPort: initial.ponData?.ponPort ?? '',
         wavelength: initial.ponData?.wavelength ?? '1490nm (GPON Downstream)',
         areaId: initial.areaId ?? 'none',
       });
     } else {
+      const tjType: TjType = createTjType === 'cut' ? 'cut' : 'box';
       setForm({
         ...EMPTY_FORM,
+        tjType,
+        isCut: tjType === 'cut',
         lat: draftPoint ? draftPoint.lat.toFixed(6) : '',
         lng: draftPoint ? draftPoint.lng.toFixed(6) : '',
         address: draftAddress || '',
@@ -262,7 +266,7 @@ export function TjFormDialog({
         areaId: defaultAreaId ?? 'none',
       });
     }
-  }, [open, initial, draftPoint, draftAddress, defaultAreaId]);
+  }, [open, initial, draftPoint, draftAddress, defaultAreaId, createTjType]);
 
   function patch(values: Partial<FormState>) {
     setForm((current) => ({ ...current, ...values }));
@@ -871,7 +875,7 @@ export function TjFormDialog({
       ponData:
         form.tjType === 'pon_power'
           ? {
-              oltName: form.oltName.trim() || undefined,
+              oltName: olts.find((olt) => olt.id === form.oltId)?.name ?? undefined,
               ponPort: form.ponPort.trim() || undefined,
               wavelength: form.wavelength,
               inputPowerDbm: inputPowerNum !== null && Number.isFinite(inputPowerNum) ? inputPowerNum : null,
@@ -884,6 +888,7 @@ export function TjFormDialog({
             }
           : null,
       areaId: form.areaId === 'none' ? null : form.areaId,
+      oltId: form.oltId === 'none' ? null : form.oltId,
     };
 
     setSaving(true);
@@ -911,106 +916,23 @@ export function TjFormDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
         <DialogHeader>
-          <DialogTitle>{initial ? `Edit ${initial.code}` : 'New terminal joint'}</DialogTitle>
+          <DialogTitle>
+            {form.tjType === 'cut'
+              ? initial
+                ? `Edit cut ${initial.code}`
+                : 'New fibre cut joint'
+              : initial
+                ? `Edit ${initial.code}`
+                : 'New terminal joint'}
+          </DialogTitle>
           <DialogDescription>
-            Configure joint type, optical input/output cores, splitters, and power budget.
+            {form.tjType === 'cut'
+              ? 'A fibre cut joint records the incident, the damaged cores and the splicing progress — no splitter, OLT or core groups.'
+              : 'A splitter joint carries the fibre cores, splitters and power budget for its site.'}
           </DialogDescription>
         </DialogHeader>
 
         <form onSubmit={handleSubmit} className="space-y-5">
-          {/* TJ TYPE SELECTOR */}
-          <section className="space-y-2">
-            <Label className="text-[11px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
-              Select Joint Type
-            </Label>
-            <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
-              {/* Type 1: Normal Box TJ */}
-              <button
-                type="button"
-                onClick={() => patch({ tjType: 'box', isCut: false })}
-                className={cn(
-                  'flex flex-col items-start gap-1 rounded-xl border p-3 text-left transition',
-                  form.tjType === 'box'
-                    ? 'border-primary bg-primary/10 shadow-sm'
-                    : 'border-white/60 bg-white/40 hover:bg-white/70 dark:border-white/10 dark:bg-white/[0.02]',
-                )}
-              >
-                <div className="flex items-center gap-2">
-                  <div
-                    className={cn(
-                      'grid size-7 place-items-center rounded-lg',
-                      form.tjType === 'box' ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground',
-                    )}
-                  >
-                    <Box className="size-4" />
-                  </div>
-                  <span className="text-[12.5px] font-semibold">Normal Box TJ</span>
-                </div>
-                <p className="mt-1 text-[10.5px] leading-snug text-muted-foreground">
-                  Standard enclosure for feeder & distribution fibers with splitter.
-                </p>
-              </button>
-
-              {/* Type 2: Fibre Cut Joint TJ */}
-              <button
-                type="button"
-                onClick={() => patch({ tjType: 'cut', isCut: true })}
-                className={cn(
-                  'flex flex-col items-start gap-1 rounded-xl border p-3 text-left transition',
-                  form.tjType === 'cut'
-                    ? 'border-rose-500 bg-rose-500/10 shadow-sm dark:border-rose-500/80'
-                    : 'border-white/60 bg-white/40 hover:bg-white/70 dark:border-white/10 dark:bg-white/[0.02]',
-                )}
-              >
-                <div className="flex items-center gap-2">
-                  <div
-                    className={cn(
-                      'grid size-7 place-items-center rounded-lg',
-                      form.tjType === 'cut' ? 'bg-rose-500 text-white' : 'bg-muted text-muted-foreground',
-                    )}
-                  >
-                    <Scissors className="size-4" />
-                  </div>
-                  <span className="text-[12.5px] font-semibold text-rose-600 dark:text-rose-400">
-                    Fibre Cut TJ
-                  </span>
-                </div>
-                <p className="mt-1 text-[10.5px] leading-snug text-muted-foreground">
-                  Emergency joint for cut repair, OTDR distance & core splicing tracking.
-                </p>
-              </button>
-
-              {/* Type 3: PON Power TJ */}
-              <button
-                type="button"
-                onClick={() => patch({ tjType: 'pon_power' })}
-                className={cn(
-                  'flex flex-col items-start gap-1 rounded-xl border p-3 text-left transition',
-                  form.tjType === 'pon_power'
-                    ? 'border-amber-500 bg-amber-500/10 shadow-sm dark:border-amber-500/80'
-                    : 'border-white/60 bg-white/40 hover:bg-white/70 dark:border-white/10 dark:bg-white/[0.02]',
-                )}
-              >
-                <div className="flex items-center gap-2">
-                  <div
-                    className={cn(
-                      'grid size-7 place-items-center rounded-lg',
-                      form.tjType === 'pon_power' ? 'bg-amber-500 text-white' : 'bg-muted text-muted-foreground',
-                    )}
-                  >
-                    <Zap className="size-4" />
-                  </div>
-                  <span className="text-[12.5px] font-semibold text-amber-600 dark:text-amber-400">
-                    PON Power TJ
-                  </span>
-                </div>
-                <p className="mt-1 text-[10.5px] leading-snug text-muted-foreground">
-                  Active monitoring joint tracking input dBm & optical budget margins.
-                </p>
-              </button>
-            </div>
-          </section>
-
           {/* BASIC JOINT INFO */}
           <section className="grid gap-3 sm:grid-cols-2">
             <div className="space-y-1.5">
@@ -1101,6 +1023,8 @@ export function TjFormDialog({
             </div>
           </section>
 
+          {form.tjType !== 'cut' ? (
+            <>
           {/* INPUT FIBRE & CORES */}
           <section className="space-y-3 rounded-2xl border border-white/60 bg-white/40 p-3 dark:border-white/10 dark:bg-white/[0.03]">
             <div className="flex items-center justify-between">
@@ -1118,6 +1042,7 @@ export function TjFormDialog({
               <strong className="text-sky-600 dark:text-sky-400">In Use</strong>, or{' '}
               <strong className="text-rose-600 dark:text-rose-400">Cut</strong>.
             </p>
+
             <CoreEditor
               value={form.cores}
               onChange={handleCoresChange}
@@ -1641,13 +1566,13 @@ export function TjFormDialog({
                                     <div
                                       key={`${uf.id}-${uCore.coreIndex}`}
                                       className={cn(
-                                        'flex items-center justify-between gap-2 rounded-lg border p-1.5 transition-colors',
+                                        'flex items-center justify-between gap-2 min-w-0 rounded-lg border p-1.5 transition-colors',
                                         isConnected
                                           ? 'border-sky-500/50 bg-sky-500/10 dark:border-sky-500/40 dark:bg-sky-500/15'
                                           : 'border-border/60 bg-background/50 hover:bg-background/80',
                                       )}
                                     >
-                                      <div className="flex items-center gap-1.5 min-w-0 flex-1">
+                                      <div className="flex items-start gap-2 min-w-0 flex-1">
                                         {/* Edit Core Color with Picker */}
                                         <label
                                           className="relative size-6 shrink-0 cursor-pointer rounded-lg border border-white/80 shadow-sm transition hover:scale-105 active:scale-95 dark:border-white/30"
@@ -1667,28 +1592,30 @@ export function TjFormDialog({
                                           />
                                         </label>
 
-                                        <input
-                                          value={uCore.label}
-                                          onChange={(e) =>
-                                            handleUpdateUserCore(uf.id, uCore.coreIndex, {
-                                              label: e.target.value,
-                                            })
-                                          }
-                                          placeholder="Core name"
-                                          className="h-6 w-20 rounded border border-transparent bg-transparent px-1 font-mono text-[11px] font-semibold outline-none transition focus:border-primary/40 focus:bg-background"
-                                          title="Click to rename core"
-                                        />
+                                        <div className="flex flex-col min-w-0 gap-0.5">
+                                          <input
+                                            value={uCore.label}
+                                            onChange={(e) =>
+                                              handleUpdateUserCore(uf.id, uCore.coreIndex, {
+                                                label: e.target.value,
+                                              })
+                                            }
+                                            placeholder="Core name"
+                                            className="h-6 w-full rounded border border-transparent bg-transparent px-1 font-mono text-[11px] font-semibold outline-none transition focus:border-primary/40 focus:bg-background"
+                                            title="Click to rename core"
+                                          />
 
-                                        <span
-                                          className={cn(
-                                            'text-[9px] font-semibold rounded px-1 py-0.2 shrink-0',
-                                            isConnected
-                                              ? 'text-sky-600 dark:text-sky-400 bg-sky-500/15'
-                                              : 'text-emerald-600 dark:text-emerald-400 bg-emerald-500/15',
-                                          )}
-                                        >
-                                          {isConnected ? 'In Use' : 'Free'}
-                                        </span>
+                                          <span
+                                            className={cn(
+                                              'text-[9px] font-semibold rounded px-1 py-0.2',
+                                              isConnected
+                                                ? 'text-sky-600 dark:text-sky-400 bg-sky-500/15'
+                                                : 'text-emerald-600 dark:text-emerald-400 bg-emerald-500/15',
+                                            )}
+                                          >
+                                            {isConnected ? 'In Use' : 'Free'}
+                                          </span>
+                                        </div>
                                       </div>
 
                                       {isConnected ? (
@@ -1746,6 +1673,8 @@ export function TjFormDialog({
               })}
             </div>
           </section>
+            </>
+          ) : null}
 
           {/* FIBRE CUT REPAIR DETAILS (shown if Fibre Cut TJ or isCut toggle) */}
           {form.tjType === 'cut' || form.isCut ? (
@@ -1771,7 +1700,7 @@ export function TjFormDialog({
                     </SelectTrigger>
                     <SelectContent>
                       <SelectItem value="minor">Minor · partial core loss</SelectItem>
-                      <SelectItem value="major">Major · distribution span down</SelectItem>
+                      <SelectItem value="major">Major · distribution link down</SelectItem>
                       <SelectItem value="outage">Outage · full trunk down</SelectItem>
                     </SelectContent>
                   </Select>
@@ -1865,6 +1794,105 @@ export function TjFormDialog({
                   className="h-9 text-[11.5px]"
                 />
               </div>
+
+              <div className="space-y-2 rounded-xl border border-rose-500/20 bg-white/50 p-2.5 dark:border-white/10 dark:bg-white/[0.03]">
+                <div className="flex items-center justify-between gap-2">
+                  <Label className="text-[10.5px] font-semibold">Fibre cores — join/splice each core</Label>
+                  <span className="text-[10px] text-muted-foreground">Edit name & color, then join</span>
+                </div>
+                {form.cores.length === 0 ? (
+                  <p className="rounded-lg border border-dashed border-border px-3 py-3 text-center text-[11px] text-muted-foreground">
+                    No cores added yet.
+                  </p>
+                ) : (
+                  <div className="space-y-1.5">
+                    {form.cores.map((core, index) => {
+                      const status = core.status ?? 'free';
+                      const isJoined = status === 'spliced' || status === 'in_use';
+                      return (
+                        <div
+                          key={`${core.label}-${index}`}
+                          className={cn(
+                            'flex items-center gap-2 rounded-xl border p-2',
+                            isJoined
+                              ? 'border-emerald-500/35 bg-emerald-500/[0.06]'
+                              : status === 'damaged'
+                                ? 'border-rose-500/35 bg-rose-500/[0.05]'
+                                : 'border-white/60 bg-white/60 dark:border-white/10 dark:bg-white/[0.03]',
+                          )}
+                        >
+                          <label
+                            className="relative size-8 shrink-0 cursor-pointer rounded-lg border border-white/70 shadow-inner transition hover:scale-105 dark:border-white/20"
+                            style={{ backgroundColor: core.color }}
+                            title="Core colour"
+                          >
+                            <input
+                              type="color"
+                              value={core.color}
+                              onChange={(e) => handleCoresChange(form.cores.map((c, i) => (i === index ? { ...c, color: e.target.value } : c)))}
+                              className="absolute inset-0 size-full cursor-pointer opacity-0"
+                              aria-label={`Colour for ${core.label || `core ${index + 1}`}`}
+                            />
+                          </label>
+                          <Input
+                            value={core.label}
+                            onChange={(e) => handleCoresChange(form.cores.map((c, i) => (i === index ? { ...c, label: e.target.value } : c)))}
+                            placeholder="Core name"
+                            className="h-8 min-w-0 flex-1 text-[12px]"
+                            aria-label="Core name"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const nextStatus: CoreStatus = isJoined ? 'damaged' : 'spliced';
+                              handleCoresChange(form.cores.map((c, i) => (i === index ? { ...c, status: nextStatus } : c)));
+                            }}
+                            className={cn(
+                              'inline-flex h-8 shrink-0 items-center gap-1 rounded-lg px-2.5 text-[10.5px] font-semibold transition',
+                              isJoined
+                                ? 'border border-emerald-500/40 bg-emerald-500/15 text-emerald-700 hover:bg-emerald-500/25 dark:text-emerald-300'
+                                : 'border border-sky-500/30 bg-sky-500/10 text-sky-700 hover:bg-sky-500/20 dark:text-sky-300',
+                            )}
+                            title={isJoined ? 'Mark as not joined' : 'Join/splice this core'}
+                          >
+                            <Link2 className="size-3" />
+                            {isJoined ? 'Joined' : 'Join core'}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleCoresChange(form.cores.filter((_, i) => i !== index))}
+                            className="grid size-8 shrink-0 place-items-center rounded-lg text-muted-foreground/70 transition hover:bg-destructive/10 hover:text-destructive"
+                            aria-label="Remove core"
+                          >
+                            <Trash2 className="size-3.5" />
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => {
+                    const next = form.cores.length + 1;
+                    handleCoresChange([
+                      ...form.cores,
+                      {
+                        label: `Core ${String(next).padStart(2, '0')}`,
+                        color: FIBRE_COLOR_PALETTE[(next - 1) % FIBRE_COLOR_PALETTE.length],
+                        count: 1,
+                        status: 'damaged' as CoreStatus,
+                      },
+                    ]);
+                  }}
+                  className="h-8 w-full gap-1.5 text-[11px]"
+                >
+                  <Plus className="size-3.5" />
+                  Add core
+                </Button>
+              </div>
             </section>
           ) : null}
 
@@ -1878,33 +1906,7 @@ export function TjFormDialog({
                 </span>
               </div>
 
-              <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-3">
-                <div className="space-y-1">
-                  <Label htmlFor="olt-name" className="text-[10.5px]">
-                    OLT Chassis / Node
-                  </Label>
-                  <Input
-                    id="olt-name"
-                    placeholder="OLT-Gulshan-01"
-                    value={form.oltName}
-                    onChange={(e) => patch({ oltName: e.target.value })}
-                    className="h-9 text-[11px]"
-                  />
-                </div>
-
-                <div className="space-y-1">
-                  <Label htmlFor="pon-port" className="text-[10.5px]">
-                    PON Port
-                  </Label>
-                  <Input
-                    id="pon-port"
-                    placeholder="GPON 0/2/1"
-                    value={form.ponPort}
-                    onChange={(e) => patch({ ponPort: e.target.value })}
-                    className="h-9 font-mono text-[11px]"
-                  />
-                </div>
-
+              <div className="grid grid-cols-1 gap-2.5">
                 <div className="space-y-1">
                   <Label htmlFor="wavelength" className="text-[10.5px]">
                     Wavelength

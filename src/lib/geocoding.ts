@@ -153,7 +153,7 @@ export async function searchLocationSuggestions(
       lat: tj.lat,
       lng: tj.lng,
       tjId: tj.id,
-      category: tj.tjType === 'cut' ? 'Cut Joint' : tj.tjType === 'pon_power' ? 'PON Power' : 'Box TJ',
+      category: tj.tjType === 'cut' ? 'Cut Joint' : tj.tjType === 'pon_power' ? 'PON Power' : 'Splitter TJ',
     });
   });
 

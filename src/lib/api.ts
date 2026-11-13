@@ -8,6 +8,10 @@ import type {
   LinkInput,
   LinkUpdate,
   Network,
+  Olt,
+  OltInput,
+  Onu,
+  OnuInput,
   Tj,
   TjInput,
   User,
@@ -221,6 +225,46 @@ export const api = {
 
   deleteArea(id: string): Promise<{ ok: boolean }> {
     return request<{ ok: boolean }>(`/areas/${id}`, { method: 'DELETE' });
+  },
+
+  olts(areaId?: string): Promise<Olt[]> {
+    return request<Olt[]>(areaId ? `/olts?areaId=${encodeURIComponent(areaId)}` : '/olts');
+  },
+
+  olt(id: string): Promise<Olt> {
+    return request<Olt>(`/olts/${id}`);
+  },
+
+  createOlt(input: OltInput): Promise<Olt> {
+    return request<Olt>('/olts', { method: 'POST', ...jsonBody(input) });
+  },
+
+  updateOlt(id: string, input: Partial<OltInput>): Promise<Olt> {
+    return request<Olt>(`/olts/${id}`, { method: 'PATCH', ...jsonBody(input) });
+  },
+
+  deleteOlt(id: string): Promise<{ ok: boolean }> {
+    return request<{ ok: boolean }>(`/olts/${id}`, { method: 'DELETE' });
+  },
+
+  onus(areaId?: string): Promise<Onu[]> {
+    return request<Onu[]>(areaId ? `/onus?areaId=${encodeURIComponent(areaId)}` : '/onus');
+  },
+
+  onu(id: string): Promise<Onu> {
+    return request<Onu>(`/onus/${id}`);
+  },
+
+  createOnu(input: OnuInput): Promise<Onu> {
+    return request<Onu>('/onus', { method: 'POST', ...jsonBody(input) });
+  },
+
+  updateOnu(id: string, input: Partial<OnuInput>): Promise<Onu> {
+    return request<Onu>(`/onus/${id}`, { method: 'PATCH', ...jsonBody(input) });
+  },
+
+  deleteOnu(id: string): Promise<{ ok: boolean }> {
+    return request<{ ok: boolean }>(`/onus/${id}`, { method: 'DELETE' });
   },
 
   createTj(input: TjInput): Promise<Tj> {

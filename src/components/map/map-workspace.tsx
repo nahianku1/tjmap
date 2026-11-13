@@ -1,28 +1,43 @@
 'use client';
 
 import dynamic from 'next/dynamic';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import useSWR from 'swr';
-import { Loader2, Plus, RefreshCw, WifiOff } from 'lucide-react';
+import { Check, Loader2, RefreshCw, Route, Trash2, Undo2, WifiOff, X } from 'lucide-react';
 import { toast } from 'sonner';
 import { Topbar } from '@/components/dashboard/topbar';
-import { Sidebar, type TjFilter } from '@/components/dashboard/sidebar';
+import { Sidebar, type DeviceFilter } from '@/components/dashboard/sidebar';
+import { MapFab } from '@/components/map/map-fab';
 import { MapOverlay } from '@/components/dashboard/map-overlay';
+import { OnuDialog } from '@/components/onu/onu-dialog';
 import { TjDetailPanel } from '@/components/map/tj-detail-panel';
+import { OltDetailPanel } from '@/components/olt/olt-detail-panel';
+import { OnuDetailPanel } from '@/components/onu/onu-detail-panel';
+import { OltDialog } from '@/components/olt/olt-dialog';
 import { TjFormDialog } from '@/components/map/tj-form-dialog';
 import { LinkDialog } from '@/components/map/link-dialog';
-import { CutDialog } from '@/components/map/cut-dialog';
+import { LinkDetailPanel } from '@/components/map/link-detail-panel';
 import { ConfirmDialog } from '@/components/map/confirm-dialog';
 import { LocationSearch } from '@/components/map/location-search';
-import { Sheet, SheetContent } from '@/components/ui/sheet';
+
 import { Button } from '@/components/ui/button';
 import { BrandMark } from '@/components/brand';
 import { api, ApiError, fetcher } from '@/lib/api';
 import { useAuth } from '@/lib/auth-context';
-import type { Area, FibreLink, Network, Tj } from '@/lib/types';
+import type {
+  Area,
+  FibreLink,
+  LinkDeviceRef,
+  LinkPathPoint,
+  Network,
+  Olt,
+  Onu,
+  Tj,
+} from '@/lib/types';
 import type { MapMode } from '@/components/map/network-map';
 import type { SearchResultItem } from '@/lib/geocoding';
+import { cn } from '@/lib/utils';
 
 const NetworkMap = dynamic(
   () => import('@/components/map/network-map').then((module) => ({ default: module.NetworkMap })),
@@ -32,9 +47,35 @@ const NetworkMap = dynamic(
 const fetchNetwork = (path: string) => fetcher<Network>(path);
 
 interface LinkDialogState {
-  from: Tj | null;
-  to: Tj | null;
+  from: LinkDeviceRef | null;
+  to: LinkDeviceRef | null;
   link: FibreLink | null;
+}
+
+function tjToRef(tj: Tj): LinkDeviceRef {
+  return { kind: 'tj', id: tj.id, code: tj.code, name: tj.name, lat: tj.lat, lng: tj.lng };
+}
+
+function oltToRef(olt: Olt): LinkDeviceRef {
+  return {
+    kind: 'olt',
+    id: olt.id,
+    code: olt.code,
+    name: olt.name,
+    lat: olt.lat ?? undefined,
+    lng: olt.lng ?? undefined,
+  };
+}
+
+function onuToRef(onu: Onu): LinkDeviceRef {
+  return {
+    kind: 'onu',
+    id: onu.id,
+    code: onu.fibreId,
+    name: onu.username,
+    lat: onu.lat ?? undefined,
+    lng: onu.lng ?? undefined,
+  };
 }
 
 /**
@@ -59,22 +100,36 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
 
   const tjs = useMemo(() => data?.tjs ?? [], [data]);
   const links = useMemo(() => data?.links ?? [], [data]);
+  const olts = useMemo(() => data?.olts ?? [], [data]);
+  const onus = useMemo(() => data?.onus ?? [], [data]);
   const cutCount = useMemo(() => tjs.filter((tj) => tj.isCut).length, [tjs]);
 
   const [mode, setMode] = useState<MapMode>('idle');
   const [selectedTjId, setSelectedTjId] = useState<string | null>(null);
   const [selectedLinkId, setSelectedLinkId] = useState<string | null>(null);
-  const [linkSourceId, setLinkSourceId] = useState<string | null>(null);
+  const [selectedOltId, setSelectedOltId] = useState<string | null>(null);
+  const [selectedOnuId, setSelectedOnuId] = useState<string | null>(null);
+  const [oltForm, setOltForm] = useState<{
+    olt: Olt | null;
+    point: { lat: number; lng: number } | null;
+  } | null>(null);
+  const [oltToDelete, setOltToDelete] = useState<Olt | null>(null);
   const [focus, setFocus] = useState<{ lng: number; lat: number; zoom?: number; nonce: number } | null>(null);
 
-  const [filter, setFilter] = useState<TjFilter>('all');
+  const [filter, setFilter] = useState<DeviceFilter>('all');
   const [search, setSearch] = useState('');
-  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
 
   const [tjFormOpen, setTjFormOpen] = useState(false);
   const [editingTj, setEditingTj] = useState<Tj | null>(null);
   const [draftPoint, setDraftPoint] = useState<{ lat: number; lng: number } | null>(null);
   const [draftAddress, setDraftAddress] = useState<string | null>(null);
+  const [createTjType, setCreateTjType] = useState<'box' | 'cut' | null>(null);
+  const [onuForm, setOnuForm] = useState<{
+    onu: Onu | null;
+    point: { lat: number; lng: number } | null;
+  } | null>(null);
+  const [onuToDelete, setOnuToDelete] = useState<Onu | null>(null);
   const [pinnedLocation, setPinnedLocation] = useState<{
     lat: number;
     lng: number;
@@ -82,7 +137,9 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
     subtitle?: string;
   } | null>(null);
   const [linkDialog, setLinkDialog] = useState<LinkDialogState | null>(null);
-  const [cutTarget, setCutTarget] = useState<Tj | null>(null);
+  const [drawingLink, setDrawingLink] = useState(false);
+  const [linkPath, setLinkPath] = useState<LinkPathPoint[]>([]);
+  const drawSnapshotRef = useRef<LinkPathPoint[]>([]);
   const [tjToDelete, setTjToDelete] = useState<Tj | null>(null);
   const [linkToDelete, setLinkToDelete] = useState<FibreLink | null>(null);
   const [deleting, setDeleting] = useState(false);
@@ -91,22 +148,76 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
     () => tjs.find((tj) => tj.id === selectedTjId) ?? null,
     [tjs, selectedTjId],
   );
-  const linkSource = useMemo(
-    () => tjs.find((tj) => tj.id === linkSourceId) ?? null,
-    [tjs, linkSourceId],
+  const selectedOlt = useMemo(
+    () => olts.find((olt) => olt.id === selectedOltId) ?? null,
+    [olts, selectedOltId],
+  );
+  const selectedOnu = useMemo(
+    () => onus.find((onu) => onu.id === selectedOnuId) ?? null,
+    [onus, selectedOnuId],
+  );
+  const selectedLink = useMemo(
+    () => links.find((link) => link.id === selectedLinkId) ?? null,
+    [links, selectedLinkId],
   );
 
-  const initialView = useMemo(() => {
-    if (!areaId || !area) return null;
-    if (area.lat !== null && area.lng !== null) {
-      return { lat: area.lat, lng: area.lng, zoom: area.zoom ?? 12 };
+  // Camera for the selected area. It is built from the area's own joints, OLTs and ONUs
+  // (the network payload is already filtered by area on the server), so opening an
+  // area always frames that area — never the national map and never another
+  // district. `bounds` is preferred so the whole area fits; a centre/zoom is only
+  // used when the area has no mapped assets yet.
+  const initialCamera = useMemo<{
+    bounds: { minLat: number; maxLat: number; minLng: number; maxLng: number } | null;
+    view: { lat: number; lng: number; zoom: number } | null;
+  }>(() => {
+    if (!areaId) return { bounds: null, view: null };
+
+    const points: { lat: number; lng: number }[] = [];
+    for (const tj of tjs) points.push({ lat: tj.lat, lng: tj.lng });
+    for (const olt of olts) {
+      if (olt.lat !== null && olt.lng !== null) points.push({ lat: olt.lat, lng: olt.lng });
     }
-    const district = area.district;
-    if (district && district.lat !== null && district.lng !== null) {
-      return { lat: district.lat, lng: district.lng, zoom: district.zoom ?? 10 };
+    for (const onu of onus) {
+      if (onu.lat !== null && onu.lng !== null) points.push({ lat: onu.lat, lng: onu.lng });
     }
-    return null;
-  }, [areaId, area]);
+
+    if (points.length > 0) {
+      const lats = points.map((point) => point.lat);
+      const lngs = points.map((point) => point.lng);
+      const minLat = Math.min(...lats);
+      const maxLat = Math.max(...lats);
+      const minLng = Math.min(...lngs);
+      const maxLng = Math.max(...lngs);
+      // Breathing room so markers are not glued to the edge, and so a single
+      // joint still resolves to a sensible street-level zoom.
+      const padLat = Math.max((maxLat - minLat) * 0.12, 0.0035);
+      const padLng = Math.max((maxLng - minLng) * 0.12, 0.0035);
+      return {
+        bounds: {
+          minLat: minLat - padLat,
+          maxLat: maxLat + padLat,
+          minLng: minLng - padLng,
+          maxLng: maxLng + padLng,
+        },
+        view: null,
+      };
+    }
+
+    // No joints or OLTs in this area yet: fall back to the area record itself,
+    // then to its own parent district (never another district, never the country).
+    if (area?.bounds) return { bounds: area.bounds, view: null };
+    if (area && area.lat !== null && area.lng !== null) {
+      return { bounds: null, view: { lat: area.lat, lng: area.lng, zoom: area.zoom ?? 13 } };
+    }
+
+    const parent = area?.district ?? null;
+    if (parent?.bounds) return { bounds: parent.bounds, view: null };
+    if (parent && parent.lat !== null && parent.lng !== null) {
+      return { bounds: null, view: { lat: parent.lat, lng: parent.lng, zoom: parent.zoom ?? 10 } };
+    }
+
+    return { bounds: null, view: null };
+  }, [areaId, area, tjs, olts]);
 
   useEffect(() => {
     if (status === 'anonymous') router.replace('/login');
@@ -115,59 +226,65 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
   useEffect(() => {
     function handleKey(event: KeyboardEvent) {
       if (event.key !== 'Escape') return;
+      if (drawingLink) {
+        setLinkPath(drawSnapshotRef.current);
+        setDrawingLink(false);
+        return;
+      }
       if (mode !== 'idle') {
         setMode('idle');
-        setLinkSourceId(null);
       }
     }
     window.addEventListener('keydown', handleKey);
     return () => window.removeEventListener('keydown', handleKey);
-  }, [mode]);
+  }, [mode, drawingLink]);
+
+  useEffect(() => {
+    function handleSidebarKey(event: KeyboardEvent) {
+      if ((event.ctrlKey || event.metaKey) && event.key === 'b') {
+        event.preventDefault();
+        setSidebarCollapsed((c) => !c);
+      }
+    }
+    window.addEventListener('keydown', handleSidebarKey);
+    return () => window.removeEventListener('keydown', handleSidebarKey);
+  }, []);
 
   const focusOn = useCallback((tj: Tj) => {
     setFocus({ lng: tj.lng, lat: tj.lat, zoom: 13.4, nonce: Date.now() });
   }, []);
 
-  const handleSelectTj = useCallback(
-    (id: string) => {
-      const tj = tjs.find((item) => item.id === id);
-      if (!tj) return;
-
-      if (mode === 'link') {
-        if (!linkSourceId) {
-          setLinkSourceId(id);
-          toast.info(`${tj.code} selected`, { description: 'Now pick the second joint to link.' });
-          return;
-        }
-        if (linkSourceId === id) {
-          setLinkSourceId(null);
-          setMode('idle');
-          return;
-        }
-        const from = tjs.find((item) => item.id === linkSourceId);
-        if (!from) return;
-        setLinkDialog({ from, to: tj, link: null });
-        setMode('idle');
-        setLinkSourceId(null);
-        return;
-      }
-
-      setSelectedTjId(id);
-      setSelectedLinkId(null);
-      focusOn(tj);
-    },
-    [mode, linkSourceId, tjs, focusOn],
-  );
+  const handleSelectTj = useCallback((id: string) => {
+    setSelectedTjId(id);
+    setSelectedLinkId(null);
+    setSelectedOltId(null);
+    setSelectedOnuId(null);
+  }, []);
 
   const handleSelectLink = useCallback(
     (id: string) => {
-      const link = links.find((item) => item.id === id);
-      if (!link) return;
+      if (!links.some((item) => item.id === id)) return;
+      setSelectedTjId(null);
+      setSelectedOltId(null);
+      setSelectedOnuId(null);
       setSelectedLinkId(id);
-      setLinkDialog({ from: null, to: null, link });
     },
     [links],
   );
+
+  const handleSelectOlt = useCallback((id: string) => {
+    setSelectedOltId(id);
+    setSelectedTjId(null);
+    setSelectedLinkId(null);
+    setSelectedOnuId(null);
+  }, []);
+
+  const handleSelectOnu = useCallback((id: string) => {
+    setSelectedOnuId(id);
+    setSelectedTjId(null);
+    setSelectedOltId(null);
+    setSelectedLinkId(null);
+  }, []);
 
   const handleMapClick = useCallback(
     (point: { lng: number; lat: number }) => {
@@ -176,53 +293,158 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
         setMode('idle');
         return;
       }
-      setDraftPoint({ lat: point.lat, lng: point.lng });
-      setEditingTj(null);
-      setTjFormOpen(true);
-      setMode('idle');
+      if (mode === 'add-olt') {
+        setOltForm({ olt: null, point: { lat: point.lat, lng: point.lng } });
+        setSelectedOltId(null);
+        setMode('idle');
+        return;
+      }
+      if (mode === 'add-tj') {
+        setDraftPoint({ lat: point.lat, lng: point.lng });
+        setEditingTj(null);
+        setCreateTjType('box');
+        setTjFormOpen(true);
+        setMode('idle');
+        return;
+      }
+      if (mode === 'add-cut-tj') {
+        setDraftPoint({ lat: point.lat, lng: point.lng });
+        setEditingTj(null);
+        setCreateTjType('cut');
+        setTjFormOpen(true);
+        setMode('idle');
+        return;
+      }
+      if (mode === 'add-onu') {
+        setSelectedOnuId(null);
+        setOnuForm({ onu: null, point: { lat: point.lat, lng: point.lng } });
+        setMode('idle');
+        return;
+      }
     },
-    [isAdmin],
+    [isAdmin, mode],
   );
 
   const handleBackgroundClick = useCallback(() => {
     if (mode === 'idle') {
       setSelectedLinkId(null);
+      setSelectedOltId(null);
+      setSelectedOnuId(null);
       setPinnedLocation(null);
     }
   }, [mode]);
 
-  const startAddMode = useCallback(() => {
+  const startAddSplitterTjMode = useCallback(() => {
     if (!isAdmin) return;
-    setMobileSidebarOpen(false);
     setSelectedTjId(null);
     setMode('add-tj');
-    toast.info('Add joint mode', {
+    toast.info('Add Splitter TJ', {
       description: area
         ? `Click the map inside ${area.name} to place it.`
         : 'Click the map inside Bangladesh to place it.',
     });
   }, [isAdmin, area]);
 
+  const startAddCutTjMode = useCallback(() => {
+    if (!isAdmin) return;
+    setSelectedTjId(null);
+    setMode('add-cut-tj');
+    toast.info('Add Fibre Cut TJ', {
+      description: area
+        ? `Click the map inside ${area.name} to place the cut joint.`
+        : 'Click the map inside Bangladesh to place the cut joint.',
+    });
+  }, [isAdmin, area]);
+
+  const startAddOltMode = useCallback(() => {
+    if (!isAdmin) return;
+    setSelectedTjId(null);
+    setSelectedOltId(null);
+    setMode('add-olt');
+    toast.info('Add OLT mode', {
+      description: area
+        ? `Click where the cabinet sits inside ${area.name}.`
+        : 'Click where the OLT cabinet sits on the map.',
+    });
+  }, [isAdmin, area]);
+
+  const startAddOnuMode = useCallback(() => {
+    if (!isAdmin) return;
+    setSelectedTjId(null);
+    setSelectedOltId(null);
+    setSelectedOnuId(null);
+    setMode('add-onu');
+    toast.info('Add ONU', {
+      description: area
+        ? `Click the map inside ${area.name} to place the ONU.`
+        : 'Click the map inside Bangladesh to place the ONU.',
+    });
+  }, [isAdmin, area]);
+
   const startLinkMode = useCallback(() => {
     if (!isAdmin) return;
-    setMobileSidebarOpen(false);
-    setMode('link');
-    setLinkSourceId((current) => current ?? selectedTjId);
-    setSelectedTjId(null);
-    toast.info('Link mode active', {
-      description: selectedTjId ? 'Pick the second joint.' : 'Select the first joint on the map.',
-    });
-  }, [isAdmin, selectedTjId]);
+    const fromRef = selectedOlt ? oltToRef(selectedOlt) : selectedTj ? tjToRef(selectedTj) : null;
+    setLinkDialog({ from: fromRef, to: null, link: null });
+    setMode('idle');
+  }, [isAdmin, selectedOlt, selectedTj]);
 
   const cancelMode = useCallback(() => {
     setMode('idle');
-    setLinkSourceId(null);
   }, []);
+
+  // Draw the cable route on the map. The dialog stays mounted (hidden) so the
+  // half-filled link form survives the trip to the map and back.
+  const startLinkDraw = useCallback(() => {
+    drawSnapshotRef.current = linkPath;
+    setLinkPath([]);
+    setDrawingLink(true);
+    toast.info('Draw cable route', {
+      description: 'Click the map to add bends, drag a point to adjust it, double-click to finish.',
+    });
+  }, [linkPath]);
+
+  const cancelLinkDraw = useCallback(() => {
+    setLinkPath(drawSnapshotRef.current);
+    setDrawingLink(false);
+  }, []);
+
+  const finishLinkDraw = useCallback(() => {
+    setDrawingLink(false);
+    toast.success('Route captured', {
+      description:
+        linkPath.length > 0
+          ? `${linkPath.length} bend${linkPath.length === 1 ? '' : 's'} on this link.`
+          : 'No bends drawn — the link will render as a straight line.',
+    });
+  }, [linkPath.length]);
+
+  const handleDrawPoint = useCallback((point: { lat: number; lng: number }) => {
+    setLinkPath((current) => {
+      // A double-click produces two clicks at the same spot; keep one bend.
+      const last = current[current.length - 1];
+      if (last && Math.abs(last.lat - point.lat) < 1e-5 && Math.abs(last.lng - point.lng) < 1e-5) {
+        return current;
+      }
+      return [...current, point];
+    });
+  }, []);
+
+  const handleMoveDrawPoint = useCallback(
+    (index: number, point: { lat: number; lng: number }) => {
+      setLinkPath((current) => current.map((item, i) => (i === index ? point : item)));
+    },
+    [],
+  );
 
   const handleLocationSelect = useCallback(
     (item: SearchResultItem) => {
       setPinnedLocation({ lat: item.lat, lng: item.lng, title: item.title, subtitle: item.subtitle });
-      setFocus({ lat: item.lat, lng: item.lng, zoom: item.type === 'tj' ? 14 : 13, nonce: Date.now() });
+      setFocus({
+        lng: item.lng,
+        lat: item.lat,
+        zoom: item.type === 'tj' ? 15 : 14,
+        nonce: Date.now(),
+      });
       if (item.type === 'tj' && item.tjId) {
         setSelectedTjId(item.tjId);
         setSelectedLinkId(null);
@@ -241,7 +463,16 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
       setDraftPoint({ lat: point.lat, lng: point.lng });
       setDraftAddress(point.address);
       setEditingTj(null);
+      setCreateTjType('box');
       setTjFormOpen(true);
+      setPinnedLocation(null);
+    },
+    [],
+  );
+
+  const handleAddOltAtPinnedLocation = useCallback(
+    (point: { lat: number; lng: number; address: string }) => {
+      setOltForm({ olt: null, point: { lat: point.lat, lng: point.lng } });
       setPinnedLocation(null);
     },
     [],
@@ -252,10 +483,9 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
       setSelectedTjId(saved.id);
       setEditingTj(null);
       setDraftPoint(null);
-      focusOn(saved);
       await mutate();
     },
-    [mutate, focusOn],
+    [mutate],
   );
 
   const handleLinkSaved = useCallback(
@@ -266,26 +496,24 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
     [mutate],
   );
 
-  const handleCutSaved = useCallback(async () => {
-    await mutate();
-  }, [mutate]);
+  const handleLinkFrom = useCallback((tj: Tj) => {
+    setLinkDialog({ from: tjToRef(tj), to: null, link: null });
+  }, []);
 
-  const handleLinkFrom = useCallback(
-    (tj: Tj) => {
-      setMode('link');
-      setLinkSourceId(tj.id);
-      setSelectedTjId(null);
-      toast.info(`${tj.code} selected`, { description: 'Pick the second joint to create the span.' });
-    },
-    [],
-  );
+  const handleLinkFromOlt = useCallback((olt: Olt) => {
+    setLinkDialog({ from: oltToRef(olt), to: null, link: null });
+  }, []);
+
+  const handleLinkFromOnu = useCallback((onu: Onu) => {
+    setLinkDialog({ from: onuToRef(onu), to: null, link: null });
+  }, []);
 
   async function confirmDeleteTj() {
     if (!tjToDelete) return;
     setDeleting(true);
     try {
       await api.deleteTj(tjToDelete.id);
-      toast.success(`${tjToDelete.code} deleted`, { description: 'Connected spans were removed too.' });
+      toast.success(`${tjToDelete.code} deleted`, { description: 'Its links were removed too.' });
       if (selectedTjId === tjToDelete.id) setSelectedTjId(null);
       setTjToDelete(null);
       await mutate();
@@ -296,17 +524,35 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
     }
   }
 
+  async function confirmDeleteOnu() {
+    if (!onuToDelete) return;
+    setDeleting(true);
+    try {
+      await api.deleteOnu(onuToDelete.id);
+      toast.success(`${onuToDelete.username} deleted`);
+      if (selectedOnuId === onuToDelete.id) setSelectedOnuId(null);
+      setOnuToDelete(null);
+      await mutate();
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : 'Could not delete this ONU');
+    } finally {
+      setDeleting(false);
+    }
+  }
+
   async function confirmDeleteLink() {
     if (!linkToDelete) return;
     setDeleting(true);
     try {
       await api.deleteLink(linkToDelete.id);
-      toast.success(`Span ${linkToDelete.fibreId} deleted`);
+      toast.success(`Link ${linkToDelete.fibreId} deleted`, {
+        description: 'Its cores are free again on both devices.',
+      });
       if (selectedLinkId === linkToDelete.id) setSelectedLinkId(null);
       setLinkToDelete(null);
       await mutate();
     } catch (err) {
-      toast.error(err instanceof ApiError ? err.message : 'Could not delete this span');
+      toast.error(err instanceof ApiError ? err.message : 'Could not delete this link');
     } finally {
       setDeleting(false);
     }
@@ -337,8 +583,9 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
           tjCount={tjs.length}
           linkCount={links.length}
           cutCount={cutCount}
-          onOpenSidebar={() => setMobileSidebarOpen(true)}
           contextLabel={area ? `${area.districtName} · ${area.name}` : undefined}
+          sidebarOpen={!sidebarCollapsed}
+          onToggleSidebar={() => setSidebarCollapsed((c) => !c)}
           back={
             areaId
               ? { href: area ? `/districts/${area.districtId}` : '/', label: area ? area.districtName : 'Districts' }
@@ -347,21 +594,30 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
         />
 
         <div className="flex min-h-0 flex-1">
-          <aside className="hidden w-[330px] shrink-0 border-r border-white/40 lg:block dark:border-white/[0.06]">
+          <aside
+            className={cn(
+              'hidden shrink-0 border-r border-white/40 lg:flex lg:flex-col overflow-hidden transition-all duration-300 ease-in-out dark:border-white/[0.06]',
+              sidebarCollapsed ? 'lg:w-0 lg:border-r-0' : 'lg:w-[330px]',
+            )}
+          >
             <Sidebar
               tjs={tjs}
+              olts={olts}
+              onus={onus}
               links={links}
               loading={isLoading}
               selectedId={selectedTjId}
+              selectedLinkId={selectedLinkId}
+              selectedOltId={selectedOltId}
+              selectedOnuId={selectedOnuId}
               filter={filter}
               search={search}
-              mode={mode}
-              isAdmin={isAdmin}
               onSearchChange={setSearch}
               onFilterChange={setFilter}
               onSelect={(tj) => handleSelectTj(tj.id)}
-              onAdd={startAddMode}
-              onStartLink={startLinkMode}
+              onSelectOlt={(olt) => handleSelectOlt(olt.id)}
+              onSelectOnu={(onu) => handleSelectOnu(onu.id)}
+              onSelectLink={(link) => handleSelectLink(link.id)}
             />
           </aside>
 
@@ -369,12 +625,22 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
             <NetworkMap
               tjs={tjs}
               links={links}
-              mode={mode}
+              olts={olts}
+              onus={onus}
+              onSelectOlt={handleSelectOlt}
+              onSelectOnu={handleSelectOnu}
+              mode={drawingLink ? 'draw-link' : mode}
+              drawPath={drawingLink ? linkPath : []}
+              onDrawPoint={handleDrawPoint}
+              onMoveDrawPoint={handleMoveDrawPoint}
+              onFinishDraw={finishLinkDraw}
               selectedTjId={selectedTjId}
               selectedLinkId={selectedLinkId}
-              linkSourceId={linkSourceId}
               focus={focus}
-              initialView={initialView}
+              viewReady={!areaId || Boolean(area) || Boolean(data) || Boolean(error)}
+              initialView={initialCamera.view}
+              initialBounds={initialCamera.bounds}
+              cameraScope={areaId ?? 'national'}
               onSelectTj={handleSelectTj}
               onSelectLink={handleSelectLink}
               onMapClick={handleMapClick}
@@ -382,6 +648,7 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
               pinnedLocation={pinnedLocation}
               onClearPinnedLocation={handleClearPinnedLocation}
               onAddTjAtPinnedLocation={handleAddTjAtPinnedLocation}
+              onAddOltAtPinnedLocation={handleAddOltAtPinnedLocation}
             />
 
             <LocationSearch
@@ -391,13 +658,75 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
               activePinned={pinnedLocation ? { title: pinnedLocation.title } : null}
             />
 
+
+
             <MapOverlay
               mode={mode}
-              linkSourceCode={linkSource?.code ?? null}
               tjs={tjs}
               links={links}
               onCancelMode={cancelMode}
             />
+
+            {drawingLink ? (
+              <div className="pointer-events-none absolute inset-x-0 top-4 z-30 flex justify-center px-4">
+                <div className="pointer-events-auto flex w-full max-w-2xl flex-wrap items-center gap-2 rounded-2xl border border-white/60 bg-background/95 p-2.5 shadow-xl backdrop-blur dark:border-white/10">
+                  <span className="grid size-8 shrink-0 place-items-center rounded-xl bg-primary/10 text-primary">
+                    <Route className="size-4" />
+                  </span>
+                  <div className="min-w-0 flex-1">
+                    <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-primary">
+                      Drawing cable route
+                    </p>
+                    <p className="text-[10px] text-muted-foreground">
+                      {linkPath.length} bend{linkPath.length === 1 ? '' : 's'} · click the map to add · drag a
+                      point to adjust · double-click to finish
+                    </p>
+                  </div>
+                  <div className="flex shrink-0 items-center gap-1">
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="ghost"
+                      disabled={linkPath.length === 0}
+                      onClick={() => setLinkPath((current) => current.slice(0, -1))}
+                    >
+                      <Undo2 className="size-3.5" />
+                      Undo
+                    </Button>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="ghost"
+                      disabled={linkPath.length === 0}
+                      onClick={() => setLinkPath([])}
+                    >
+                      <Trash2 className="size-3.5" />
+                      Clear
+                    </Button>
+                    <Button type="button" size="sm" variant="ghost" onClick={cancelLinkDraw}>
+                      <X className="size-3.5" />
+                      Cancel
+                    </Button>
+                    <Button type="button" size="sm" onClick={finishLinkDraw}>
+                      <Check className="size-3.5" />
+                      Done
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            ) : null}
+
+            {drawingLink ? null : (
+              <MapFab
+                isAdmin={isAdmin}
+                mode={mode}
+                onAddSplitterTj={startAddSplitterTjMode}
+                onAddCutTj={startAddCutTjMode}
+                onAddOlt={startAddOltMode}
+                onAddLink={startLinkMode}
+                onAddOnu={startAddOnuMode}
+              />
+            )}
 
             {error ? (
               <div className="absolute left-1/2 top-4 z-20 flex w-[calc(100%-2rem)] max-w-sm -translate-x-1/2 items-center gap-2.5 rounded-2xl border border-destructive/25 bg-destructive/10 px-3 py-2.5 backdrop-blur">
@@ -412,41 +741,63 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
               </div>
             ) : null}
 
-            <Button
-              onClick={startAddMode}
-              className="absolute bottom-4 right-16 z-10 h-11 w-11 rounded-full shadow-lg lg:hidden"
-              size="icon"
-              aria-label="Add terminal joint"
-            >
-              <Plus className="size-5" />
-            </Button>
+
           </main>
         </div>
       </div>
 
-      <Sheet open={mobileSidebarOpen} onOpenChange={setMobileSidebarOpen}>
-        <SheetContent className="w-[92vw] p-0 sm:w-[360px]" showClose={false}>
-          <Sidebar
-            tjs={tjs}
-            links={links}
-            loading={isLoading}
-            selectedId={selectedTjId}
-            filter={filter}
-            search={search}
-            mode={mode}
-            isAdmin={isAdmin}
-            onSearchChange={setSearch}
-            onFilterChange={setFilter}
-            onSelect={(tj) => {
-              handleSelectTj(tj.id);
-              setMobileSidebarOpen(false);
-            }}
-            onAdd={startAddMode}
-            onStartLink={startLinkMode}
-            onClose={() => setMobileSidebarOpen(false)}
-          />
-        </SheetContent>
-      </Sheet>
+
+
+      <LinkDetailPanel
+        link={selectedLink}
+        isAdmin={isAdmin}
+        onClose={() => setSelectedLinkId(null)}
+        onEdit={(link) => {
+          setSelectedLinkId(null);
+          setLinkDialog({ from: null, to: null, link });
+        }}
+        onDelete={(link) => {
+          setSelectedLinkId(null);
+          setLinkToDelete(link);
+        }}
+      />
+
+      <OltDetailPanel
+        olt={selectedOlt}
+        links={links}
+        isAdmin={isAdmin}
+        onClose={() => setSelectedOltId(null)}
+        onEdit={(olt) => setOltForm({ olt, point: null })}
+        onLinkFrom={handleLinkFromOlt}
+        onSelectLink={(link) => handleSelectLink(link.id)}
+        onDelete={(olt) => setOltToDelete(olt)}
+      />
+
+      <OltDialog
+        open={Boolean(oltForm)}
+        onOpenChange={(open) => {
+          if (!open) setOltForm(null);
+        }}
+        olt={oltForm?.olt ?? null}
+        draftPoint={oltForm?.point ?? null}
+        defaultAreaId={areaId ?? null}
+        onSaved={async (saved) => {
+          setOltForm(null);
+          setSelectedOltId(saved.id);
+          await mutate();
+        }}
+      />
+
+      <OnuDetailPanel
+        onu={selectedOnu}
+        links={links}
+        isAdmin={isAdmin}
+        onClose={() => setSelectedOnuId(null)}
+        onEdit={(onu) => setOnuForm({ onu, point: null })}
+        onLinkFrom={handleLinkFromOnu}
+        onSelectLink={(link) => handleSelectLink(link.id)}
+        onDelete={(onu) => setOnuToDelete(onu)}
+      />
 
       <TjDetailPanel
         tj={selectedTj}
@@ -459,7 +810,6 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
         }}
         onDelete={(tj) => setTjToDelete(tj)}
         onLinkFrom={handleLinkFrom}
-        onManageCut={(tj) => setCutTarget(tj)}
         onSelectLink={(link) => handleSelectLink(link.id)}
       />
 
@@ -471,23 +821,37 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
             setEditingTj(null);
             setDraftPoint(null);
             setDraftAddress(null);
+            setCreateTjType(null);
           }
         }}
         initial={editingTj}
         draftPoint={draftPoint}
         draftAddress={draftAddress}
         defaultAreaId={areaId ?? null}
+        createTjType={createTjType}
         onSaved={handleTjSaved}
       />
 
       <LinkDialog
         open={Boolean(linkDialog)}
         onOpenChange={(open) => {
-          if (!open) setLinkDialog(null);
+          if (!open) {
+            setLinkDialog(null);
+            setDrawingLink(false);
+            setLinkPath([]);
+          }
         }}
+        tjs={tjs}
+        olts={olts}
+        onus={onus}
+        links={links}
         from={linkDialog?.from ?? null}
         to={linkDialog?.to ?? null}
         link={linkDialog?.link ?? null}
+        path={linkPath}
+        onPathChange={setLinkPath}
+        onStartDraw={startLinkDraw}
+        drawing={drawingLink}
         onSaved={handleLinkSaved}
         onRequestDelete={(link) => {
           setLinkDialog(null);
@@ -495,13 +859,57 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
         }}
       />
 
-      <CutDialog
-        tj={cutTarget}
-        open={Boolean(cutTarget)}
+      <ConfirmDialog
+        open={Boolean(oltToDelete)}
         onOpenChange={(open) => {
-          if (!open) setCutTarget(null);
+          if (!open) setOltToDelete(null);
         }}
-        onSaved={handleCutSaved}
+        title={`Delete ${oltToDelete?.name ?? 'OLT'}?`}
+        description="The OLT is removed and its joints keep their location but lose the OLT link."
+        confirmLabel="Delete OLT"
+        loading={deleting}
+        onConfirm={async () => {
+          if (!oltToDelete) return;
+          setDeleting(true);
+          try {
+            await api.deleteOlt(oltToDelete.id);
+            toast.success(`${oltToDelete.name} deleted`);
+            setSelectedOltId(null);
+            setOltToDelete(null);
+            await mutate();
+          } catch (err) {
+            toast.error(err instanceof ApiError ? err.message : 'Could not delete this OLT');
+          } finally {
+            setDeleting(false);
+          }
+        }}
+      />
+
+      <OnuDialog
+        open={Boolean(onuForm)}
+        onOpenChange={(open) => {
+          if (!open) setOnuForm(null);
+        }}
+        onu={onuForm?.onu ?? null}
+        draftPoint={onuForm?.point ?? null}
+        defaultAreaId={areaId ?? null}
+        onSaved={async (saved) => {
+          setOnuForm(null);
+          setSelectedOnuId(saved.id);
+          await mutate();
+        }}
+      />
+
+      <ConfirmDialog
+        open={Boolean(onuToDelete)}
+        onOpenChange={(open) => {
+          if (!open) setOnuToDelete(null);
+        }}
+        title={`Delete ${onuToDelete?.username ?? 'ONU'}?`}
+        description="The ONU is removed from the map and its service area."
+        confirmLabel="Delete ONU"
+        loading={deleting}
+        onConfirm={confirmDeleteOnu}
       />
 
       <ConfirmDialog
@@ -510,7 +918,7 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
           if (!open) setTjToDelete(null);
         }}
         title={`Delete ${tjToDelete?.code ?? 'joint'}?`}
-        description="This removes the terminal joint and every fibre span attached to it. This cannot be undone."
+        description="This removes the terminal joint and every fibre link attached to it. This cannot be undone."
         confirmLabel="Delete joint"
         loading={deleting}
         onConfirm={confirmDeleteTj}
@@ -521,9 +929,9 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
         onOpenChange={(open) => {
           if (!open) setLinkToDelete(null);
         }}
-        title={`Delete span ${linkToDelete?.fibreId ?? ''}?`}
-        description="The fibre span between these two joints will be removed from the map."
-        confirmLabel="Delete span"
+        title={`Delete link ${linkToDelete?.fibreId ?? ''}?`}
+        description="The fibre is removed and every core it connected becomes free again on both devices."
+        confirmLabel="Delete link"
         loading={deleting}
         onConfirm={confirmDeleteLink}
       />

@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { ChevronLeft, Menu, Radio, Scissors, Waypoints } from 'lucide-react';
+import { ChevronLeft, PanelLeftClose, PanelLeftOpen, Radio, Scissors, Waypoints } from 'lucide-react';
 import { Brand, BrandMark } from '@/components/brand';
 import { ThemeToggle } from '@/components/theme-toggle';
 import { UserMenu } from './user-menu';
@@ -11,19 +11,21 @@ interface TopbarProps {
   tjCount: number;
   linkCount: number;
   cutCount: number;
-  onOpenSidebar: () => void;
   /** Shown instead of “National FTTH map”, e.g. “Dhaka · Gulshan–Banani”. */
   contextLabel?: string;
   back?: { href: string; label: string };
+  sidebarOpen?: boolean;
+  onToggleSidebar?: () => void;
 }
 
 export function Topbar({
   tjCount,
   linkCount,
   cutCount,
-  onOpenSidebar,
   contextLabel,
   back,
+  sidebarOpen = true,
+  onToggleSidebar,
 }: TopbarProps) {
   return (
     <header className="relative z-20 flex h-[58px] shrink-0 items-center gap-2 border-b border-white/40 px-3 sm:h-16 sm:gap-3 sm:px-4 dark:border-white/[0.06]">
@@ -38,14 +40,22 @@ export function Topbar({
         </Link>
       ) : null}
 
-      <button
-        type="button"
-        onClick={onOpenSidebar}
-        className="grid size-9 shrink-0 place-items-center rounded-xl border border-white/60 bg-white/50 text-muted-foreground shadow-sm transition hover:text-foreground lg:hidden dark:border-white/10 dark:bg-white/[0.05]"
-        aria-label="Open network inventory"
-      >
-        <Menu className="size-4" />
-      </button>
+      {/* Desktop sidebar toggle button */}
+      {onToggleSidebar ? (
+        <button
+          type="button"
+          onClick={onToggleSidebar}
+          className="hidden lg:grid size-9 shrink-0 place-items-center rounded-xl border border-white/60 bg-white/50 text-muted-foreground shadow-sm transition hover:border-primary/40 hover:bg-white/80 hover:text-foreground active:scale-95 dark:border-white/10 dark:bg-white/[0.05] dark:hover:bg-white/[0.1]"
+          title={sidebarOpen ? 'Collapse sidebar (Ctrl+B)' : 'Open sidebar (Ctrl+B)'}
+          aria-label={sidebarOpen ? 'Collapse sidebar' : 'Open sidebar'}
+        >
+          {sidebarOpen ? (
+            <PanelLeftClose className="size-4 text-primary" />
+          ) : (
+            <PanelLeftOpen className="size-4 text-muted-foreground" />
+          )}
+        </button>
+      ) : null}
 
       <div className="hidden sm:block">
         <Brand compact />

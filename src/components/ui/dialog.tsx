@@ -27,11 +27,16 @@ function DialogContent({
   className,
   children,
   showClose = true,
+  hideOverlay = false,
   ...props
-}: React.ComponentProps<typeof DialogPrimitive.Content> & { showClose?: boolean }) {
+}: React.ComponentProps<typeof DialogPrimitive.Content> & {
+  showClose?: boolean;
+  /** Keep the page behind interactive (used while drawing on the map). */
+  hideOverlay?: boolean;
+}) {
   return (
     <DialogPortal>
-      <DialogOverlay />
+      {hideOverlay ? null : <DialogOverlay />}
       <DialogPrimitive.Content
         data-slot="dialog-content"
         className={cn(

@@ -58,7 +58,7 @@ export default function LoginPage() {
           Back to the NOC
         </h2>
         <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
-          Sign in to inspect terminal joints, fibre spans and live cuts across your divisions.
+          Sign in to inspect terminal joints, fibre links and live cuts across your divisions.
         </p>
 
         <form onSubmit={handleSubmit} className="mt-7 space-y-4">

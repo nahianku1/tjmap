@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240" width="240" height="240" role="img" aria-label="Damaged fibre cut joint">
+  <defs>
+    <linearGradient id="wallCut" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2a1b28"/>
+      <stop offset="1" stop-color="#160d16"/>
+    </linearGradient>
+    <linearGradient id="shellCut" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#e9e2df"/>
+      <stop offset="0.55" stop-color="#bcb0aa"/>
+      <stop offset="1" stop-color="#8b7d76"/>
+    </linearGradient>
+    <linearGradient id="spoiler" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f59e0b"/>
+      <stop offset="1" stop-color="#dc2626"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="240" height="240" fill="url(#wallCut)"/>
+  <circle cx="190" cy="180" r="70" fill="#dc2626" opacity="0.2"/>
+
+  <rect x="40" y="56" width="152" height="118" rx="14" fill="url(#shellCut)" stroke="#5b6b7d" stroke-width="2"/>
+  <rect x="46" y="62" width="140" height="96" rx="10" fill="#f0ebe8" stroke="#a1968f" stroke-width="1.5" opacity="0.9"/>
+
+  <path d="M52 70l26 42-18 10 34 20-10 18 40 8" stroke="#111827" stroke-width="5" stroke-linejoin="round" fill="none" opacity="0.85"/>
+  <path d="M52 70l26 42-18 10 34 20-10 18 40 8" stroke="#f97316" stroke-width="2" stroke-linejoin="round" fill="none"/>
+
+  <g fill="#fbbf24">
+    <circle cx="120" cy="150" r="3"/>
+    <circle cx="136" cy="162" r="2.4"/>
+    <circle cx="104" cy="164" r="2.2"/>
+    <circle cx="150" cy="146" r="2"/>
+  </g>
+
+  <rect x="70" y="158" width="30" height="10" rx="3" fill="#b91c1c"/>
+  <rect x="150" y="158" width="24" height="10" rx="3" fill="#334155" opacity="0.45"/>
+
+  <g>
+    <circle cx="66" cy="176" r="6" fill="#111c2b"/>
+    <circle cx="98" cy="176" r="6" fill="#111c2b"/>
+    <circle cx="130" cy="176" r="6" fill="#111c2b"/>
+    <circle cx="162" cy="176" r="6" fill="#111c2b"/>
+  </g>
+  <g fill="none" stroke-width="3" stroke-linecap="round">
+    <path d="M66 182c-4 16 2 24-8 34" stroke="#f87171"/>
+    <path d="M98 182c-2 18 6 26 2 40" stroke="#fb923c"/>
+    <path d="M130 182c2 16-4 28 0 40" stroke="#64748b" stroke-dasharray="4 6"/>
+    <path d="M162 182c4 14 8 24 14 32" stroke="#f87171"/>
+  </g>
+
+  <path d="M126 100l22-26" stroke="url(#spoiler)" stroke-width="4" stroke-linecap="round" opacity="0.9"/>
+</svg>

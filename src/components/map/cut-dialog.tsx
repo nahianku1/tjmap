@@ -77,7 +77,7 @@ export function CutDialog({ tj, open, onOpenChange, onSaved }: CutDialogProps) {
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="minor">Minor · partial degradation</SelectItem>
-                <SelectItem value="major">Major · span down</SelectItem>
+                <SelectItem value="major">Major · link down</SelectItem>
                 <SelectItem value="outage">Outage · full service loss</SelectItem>
               </SelectContent>
             </Select>
