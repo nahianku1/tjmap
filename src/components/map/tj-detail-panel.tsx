@@ -66,7 +66,12 @@ export function TjDetailPanel({
 
   const spans = useMemo(() => {
     if (!tj) return [];
-    return links.filter((link) => link.fromTjId === tj.id || link.toTjId === tj.id);
+    return links.filter(
+      (link) =>
+        link.fromTjId === tj.id ||
+        link.toTjId === tj.id ||
+        ((tj.tjType === 'cut' || tj.isCut) && tj.fibreId != null && tj.fibreId !== '' && link.fibreId === tj.fibreId),
+    );
   }, [tj, links]);
 
   /** For each core of this joint, the link patched to it and the device at its far end. */
@@ -283,23 +288,27 @@ export function TjDetailPanel({
                   accent="text-teal-500"
                 />
                 <Metric label="Connected links" value={String(spans.length)} icon={Cable} accent="text-sky-500" />
-                <Metric
-                  label="Input power"
-                  value={
-                    inputPower !== null && inputPower !== undefined
-                      ? `${inputPower > 0 ? `+${inputPower}` : inputPower} dBm`
-                      : '—'
-                  }
-                  icon={Gauge}
-                  accent="text-amber-500"
-                  mono
-                />
-                <Metric
-                  label="Splitter outputs"
-                  value={tj.splitter?.enabled ? `${outputCoresCount}` : '—'}
-                  icon={Split}
-                  accent="text-violet-500"
-                />
+                {!(tj.isCut || tjType === 'cut') ? (
+                  <>
+                    <Metric
+                      label="Input power"
+                      value={
+                        inputPower !== null && inputPower !== undefined
+                          ? `${inputPower > 0 ? `+${inputPower}` : inputPower} dBm`
+                          : '—'
+                      }
+                      icon={Gauge}
+                      accent="text-amber-500"
+                      mono
+                    />
+                    <Metric
+                      label="Splitter outputs"
+                      value={tj.splitter?.enabled ? `${outputCoresCount}` : '—'}
+                      icon={Split}
+                      accent="text-violet-500"
+                    />
+                  </>
+                ) : null}
               </div>
 
               {/* SPLITTER POWER BUDGET CARD */}

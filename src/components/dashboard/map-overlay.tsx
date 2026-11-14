@@ -91,7 +91,7 @@ export function MapOverlay({ mode, tjs, links, onCancelMode }: MapOverlayProps) 
           </div>
 
           <div className="grid grid-cols-2 gap-x-2 gap-y-1.5 px-3 py-2.5 text-[9.5px] text-muted-foreground">
-            <Legend color="#2dd4bf" label="Active link" />
+            <Legend color="#000000" label="Active link" />
             <Legend color="#fb7185" label="Cut link" dashed />
             <Legend color="#22d3ee" label="Joint" dot />
             <Legend color="#a78bfa" label="Splitter" dot />

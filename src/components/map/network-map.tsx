@@ -268,13 +268,20 @@ function addNetworkLayers(map: maplibregl.Map, dark: boolean) {
           'case',
           ['==', ['get', 'status'], 'cut'],
           dark ? '#fb7185' : '#e11d48',
-          dark ? '#22d3ee' : '#111827',
+          '#000000',
         ] as never,
         'line-width': ['interpolate', ['linear'], ['zoom'], 4, 5, 10, 8, 15, 11] as never,
         'line-blur': 7,
-        'line-opacity': dark ? 0.4 : 0.2,
+        'line-opacity': dark ? 0.35 : 0.18,
       },
     });
+  } else {
+    map.setPaintProperty(
+      'links-glow',
+      'line-color',
+      ['case', ['==', ['get', 'status'], 'cut'], dark ? '#fb7185' : '#e11d48', '#000000'] as never,
+    );
+    map.setPaintProperty('links-glow', 'line-opacity', dark ? 0.35 : 0.18);
   }
 
   if (!map.getLayer('links-base')) {
@@ -285,11 +292,14 @@ function addNetworkLayers(map: maplibregl.Map, dark: boolean) {
       filter: ['==', ['get', 'status'], 'active'],
       layout: { 'line-cap': 'round', 'line-join': 'round' },
       paint: {
-        'line-color': dark ? '#2dd4bf' : '#111827',
+        'line-color': '#000000',
         'line-width': ['interpolate', ['linear'], ['zoom'], 4, 1.2, 10, 2, 15, 3] as never,
         'line-opacity': 0.95,
       },
     });
+  } else {
+    map.setPaintProperty('links-base', 'line-color', '#000000');
+    map.setPaintProperty('links-base', 'line-opacity', 0.95);
   }
 
   if (!map.getLayer('links-cut')) {
@@ -316,12 +326,15 @@ function addNetworkLayers(map: maplibregl.Map, dark: boolean) {
       filter: ['==', ['get', 'status'], 'active'],
       layout: { 'line-cap': 'round', 'line-join': 'round' },
       paint: {
-        'line-color': dark ? '#ecfeff' : '#f8fafc',
+        'line-color': '#67e8f9',
         'line-width': ['interpolate', ['linear'], ['zoom'], 6, 0.7, 12, 1.5] as never,
-        'line-opacity': 0.7,
+        'line-opacity': 0.85,
         'line-dasharray': [1, 5],
       },
     });
+  } else {
+    map.setPaintProperty('links-flow', 'line-color', '#67e8f9');
+    map.setPaintProperty('links-flow', 'line-opacity', 0.85);
   }
 
   if (!map.getLayer('links-hit')) {
@@ -345,12 +358,15 @@ function addNetworkLayers(map: maplibregl.Map, dark: boolean) {
       source: 'draft-path',
       layout: { 'line-cap': 'round', 'line-join': 'round' },
       paint: {
-        'line-color': '#22d3ee',
+        'line-color': '#000000',
         'line-width': 10,
         'line-blur': 6,
-        'line-opacity': 0.45,
+        'line-opacity': 0.25,
       },
     });
+  } else {
+    map.setPaintProperty('draft-path-glow', 'line-color', '#000000');
+    map.setPaintProperty('draft-path-glow', 'line-opacity', 0.25);
   }
 
   if (!map.getLayer('draft-path')) {
@@ -360,12 +376,15 @@ function addNetworkLayers(map: maplibregl.Map, dark: boolean) {
       source: 'draft-path',
       layout: { 'line-cap': 'round', 'line-join': 'round' },
       paint: {
-        'line-color': '#a5f3fc',
+        'line-color': '#000000',
         'line-width': 3,
         'line-dasharray': [1.6, 1.2],
         'line-opacity': 0.95,
       },
     });
+  } else {
+    map.setPaintProperty('draft-path', 'line-color', '#000000');
+    map.setPaintProperty('draft-path', 'line-opacity', 0.95);
   }
 
   if (!map.getLayer('measure-fill')) {
@@ -374,10 +393,13 @@ function addNetworkLayers(map: maplibregl.Map, dark: boolean) {
       type: 'fill',
       source: 'measure-fill',
       paint: {
-        'fill-color': dark ? '#22d3ee' : '#111827',
-        'fill-opacity': dark ? 0.16 : 0.1,
+        'fill-color': '#000000',
+        'fill-opacity': 0.12,
       },
     });
+  } else {
+    map.setPaintProperty('measure-fill', 'fill-color', '#000000');
+    map.setPaintProperty('measure-fill', 'fill-opacity', 0.12);
   }
 
   if (!map.getLayer('measure-line')) {
@@ -387,11 +409,13 @@ function addNetworkLayers(map: maplibregl.Map, dark: boolean) {
       source: 'measure-line',
       layout: { 'line-cap': 'round', 'line-join': 'round' },
       paint: {
-        'line-color': dark ? '#a5f3fc' : '#111827',
+        'line-color': '#000000',
         'line-width': 2.2,
         'line-dasharray': [2, 1.4],
       },
     });
+  } else {
+    map.setPaintProperty('measure-line', 'line-color', '#000000');
   }
 
   if (!map.getLayer('links-selected')) {

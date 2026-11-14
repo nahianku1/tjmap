@@ -125,6 +125,9 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
   const [draftPoint, setDraftPoint] = useState<{ lat: number; lng: number } | null>(null);
   const [draftAddress, setDraftAddress] = useState<string | null>(null);
   const [createTjType, setCreateTjType] = useState<'box' | 'cut' | null>(null);
+  const [prefillTjCores, setPrefillTjCores] = useState<import('@/lib/types').Core[] | null>(null);
+  const [prefillTjFibreId, setPrefillTjFibreId] = useState<string | null>(null);
+  const [joinRestoreLink, setJoinRestoreLink] = useState<FibreLink | null>(null);
   const [onuForm, setOnuForm] = useState<{
     onu: Onu | null;
     point: { lat: number; lng: number } | null;
@@ -483,9 +486,26 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
       setSelectedTjId(saved.id);
       setEditingTj(null);
       setDraftPoint(null);
+      setPrefillTjCores(null);
+      setPrefillTjFibreId(null);
+
+      const linkToRestore = joinRestoreLink;
+      setJoinRestoreLink(null);
+      if (linkToRestore) {
+        try {
+          const updated = await api.updateLink(linkToRestore.id, { status: 'active' });
+          toast.success(`Link ${updated.fibreId} restored`, {
+            description: 'Cores joined and the link is back in service.',
+          });
+          setSelectedLinkId(updated.id);
+        } catch (err) {
+          toast.error(err instanceof ApiError ? err.message : 'Cores saved, but could not auto-restore the link.');
+        }
+      }
+
       await mutate();
     },
-    [mutate],
+    [mutate, joinRestoreLink],
   );
 
   const handleLinkSaved = useCallback(
@@ -756,6 +776,67 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
           setSelectedLinkId(null);
           setLinkDialog({ from: null, to: null, link });
         }}
+        onCut={async (link) => {
+          try {
+            const updated = await api.updateLink(link.id, { status: 'cut' });
+            toast.success(`Link ${updated.fibreId} marked as cut`, {
+              description: 'Use Join to open the fibre cut modal, join cores, and restore it.',
+            });
+            await mutate();
+          } catch (err) {
+            toast.error(err instanceof ApiError ? err.message : 'Could not mark this link as cut');
+          }
+        }}
+        onJoin={(link) => {
+          const points = [
+            { lat: link.fromLat, lng: link.fromLng },
+            ...(link.path ?? []),
+            { lat: link.toLat, lng: link.toLng },
+          ];
+          let midLat = (link.fromLat + link.toLat) / 2;
+          let midLng = (link.fromLng + link.toLng) / 2;
+          if (points.length >= 2) {
+            const segs: number[] = [];
+            let total = 0;
+            for (let i = 0; i < points.length - 1; i++) {
+              const dLat = points[i + 1].lat - points[i].lat;
+              const midLatRad = ((points[i].lat + points[i + 1].lat) / 2) * (Math.PI / 180);
+              const dLng = (points[i + 1].lng - points[i].lng) * Math.cos(midLatRad);
+              const d = Math.sqrt(dLat * dLat + dLng * dLng);
+              segs.push(d);
+              total += d;
+            }
+            if (total > 0) {
+              let target = total / 2;
+              for (let i = 0; i < segs.length; i++) {
+                if (target <= segs[i] || i === segs.length - 1) {
+                  const t = segs[i] === 0 ? 0 : target / segs[i];
+                  midLat = points[i].lat + (points[i + 1].lat - points[i].lat) * t;
+                  midLng = points[i].lng + (points[i + 1].lng - points[i].lng) * t;
+                  break;
+                }
+                target -= segs[i];
+              }
+            }
+          }
+
+          const palette = ['#22d3ee','#34d399','#a78bfa','#fbbf24','#fb7185','#60a5fa','#a3e635','#fb923c'];
+          const cores = (link.cores?.length ? link.cores : Array.from({ length: link.coreCount || 0 }, (_, i) => ({ label: `Core ${i + 1}`, color: palette[i % palette.length] }))).map((c, i) => ({
+            label: c.label || `Core ${i + 1}`,
+            color: c.color || palette[i % palette.length],
+            count: 1,
+            status: 'damaged' as const,
+          }));
+          setJoinRestoreLink(link);
+          setSelectedLinkId(null);
+          setDraftPoint({ lat: midLat, lng: midLng });
+          setDraftAddress(`Cut repair · ${link.fibreId} (${link.fromCode} → ${link.toCode})`);
+          setEditingTj(null);
+          setCreateTjType('cut');
+          setPrefillTjCores(cores);
+          setPrefillTjFibreId(link.fibreId);
+          setTjFormOpen(true);
+        }}
         onDelete={(link) => {
           setSelectedLinkId(null);
           setLinkToDelete(link);
@@ -822,6 +903,9 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
             setDraftPoint(null);
             setDraftAddress(null);
             setCreateTjType(null);
+            setPrefillTjCores(null);
+            setPrefillTjFibreId(null);
+            setJoinRestoreLink(null);
           }
         }}
         initial={editingTj}
@@ -829,6 +913,8 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
         draftAddress={draftAddress}
         defaultAreaId={areaId ?? null}
         createTjType={createTjType}
+        prefillCores={prefillTjCores}
+        prefillFibreId={prefillTjFibreId}
         onSaved={handleTjSaved}
       />
 

@@ -75,6 +75,8 @@ interface TjFormDialogProps {
   draftAddress?: string | null;
   defaultAreaId?: string | null;
   createTjType?: 'box' | 'cut' | null;
+  prefillCores?: Core[] | null;
+  prefillFibreId?: string | null;
   onSaved: (tj: Tj, mode: 'create' | 'update') => void;
 }
 
@@ -177,6 +179,8 @@ export function TjFormDialog({
   draftAddress,
   defaultAreaId,
   createTjType,
+  prefillCores,
+  prefillFibreId,
   onSaved,
 }: TjFormDialogProps) {
   const [form, setForm] = useState<FormState>(EMPTY_FORM);
@@ -255,6 +259,9 @@ export function TjFormDialog({
       });
     } else {
       const tjType: TjType = createTjType === 'cut' ? 'cut' : 'box';
+      const prefill = prefillCores && prefillCores.length > 0 ? prefillCores : null;
+      const damaged = prefill ? prefill.filter((c) => (c.status ?? 'damaged') === 'damaged').length : (tjType === 'cut' ? 12 : 0);
+      const restored = prefill ? prefill.filter((c) => c.status === 'spliced' || c.status === 'in_use').length : 0;
       setForm({
         ...EMPTY_FORM,
         tjType,
@@ -263,10 +270,14 @@ export function TjFormDialog({
         lng: draftPoint ? draftPoint.lng.toFixed(6) : '',
         address: draftAddress || '',
         name: draftAddress ? draftAddress.split(',')[0] : '',
+        fibreId: prefillFibreId || '',
+        cores: prefill ?? EMPTY_FORM.cores,
+        damagedCores: String(damaged),
+        restoredCores: String(restored),
         areaId: defaultAreaId ?? 'none',
       });
     }
-  }, [open, initial, draftPoint, draftAddress, defaultAreaId, createTjType]);
+  }, [open, initial, draftPoint, draftAddress, defaultAreaId, createTjType, prefillCores, prefillFibreId]);
 
   function patch(values: Partial<FormState>) {
     setForm((current) => ({ ...current, ...values }));
@@ -1748,8 +1759,10 @@ export function TjFormDialog({
                   <Input
                     id="damaged-cores"
                     type="number"
-                    placeholder="12"
+                    placeholder="0"
                     value={form.damagedCores}
+                    readOnly
+                    disabled={Boolean(prefillCores && prefillCores.length > 0)}
                     onChange={(e) => patch({ damagedCores: e.target.value })}
                     className="h-9 font-mono text-[11px]"
                   />
@@ -1763,6 +1776,7 @@ export function TjFormDialog({
                     type="number"
                     placeholder="0"
                     value={form.restoredCores}
+                    readOnly
                     onChange={(e) => patch({ restoredCores: e.target.value })}
                     className="h-9 font-mono text-[11px]"
                   />
@@ -1797,12 +1811,19 @@ export function TjFormDialog({
 
               <div className="space-y-2 rounded-xl border border-rose-500/20 bg-white/50 p-2.5 dark:border-white/10 dark:bg-white/[0.03]">
                 <div className="flex items-center justify-between gap-2">
-                  <Label className="text-[10.5px] font-semibold">Fibre cores — join/splice each core</Label>
+                  <div>
+                    <Label className="text-[10.5px] font-semibold">Fibre cores — join/splice each core</Label>
+                    {form.fibreId ? (
+                      <p className="mt-0.5 text-[10px] text-muted-foreground">
+                        Fibre: <span className="font-mono font-semibold text-foreground">{form.fibreId}</span>
+                      </p>
+                    ) : null}
+                  </div>
                   <span className="text-[10px] text-muted-foreground">Edit name & color, then join</span>
                 </div>
                 {form.cores.length === 0 ? (
                   <p className="rounded-lg border border-dashed border-border px-3 py-3 text-center text-[11px] text-muted-foreground">
-                    No cores added yet.
+                    No cores for this fibre.
                   </p>
                 ) : (
                   <div className="space-y-1.5">
@@ -1845,7 +1866,20 @@ export function TjFormDialog({
                             type="button"
                             onClick={() => {
                               const nextStatus: CoreStatus = isJoined ? 'damaged' : 'spliced';
-                              handleCoresChange(form.cores.map((c, i) => (i === index ? { ...c, status: nextStatus } : c)));
+                              const nextCores = form.cores.map((c, i) => (i === index ? { ...c, status: nextStatus } : c));
+                              const restored = nextCores.filter((c) => c.status === 'spliced' || c.status === 'in_use').length;
+                              const damaged = nextCores.filter((c) => c.status === 'damaged').length;
+                              patch({
+                                cores: nextCores,
+                                restoredCores: String(restored),
+                                damagedCores: String(damaged),
+                                repairStatus:
+                                  restored >= nextCores.length && nextCores.length > 0
+                                    ? 'restored'
+                                    : restored > 0
+                                      ? 'splicing_in_progress'
+                                      : form.repairStatus,
+                              });
                             }}
                             className={cn(
                               'inline-flex h-8 shrink-0 items-center gap-1 rounded-lg px-2.5 text-[10.5px] font-semibold transition',
@@ -1858,40 +1892,11 @@ export function TjFormDialog({
                             <Link2 className="size-3" />
                             {isJoined ? 'Joined' : 'Join core'}
                           </button>
-                          <button
-                            type="button"
-                            onClick={() => handleCoresChange(form.cores.filter((_, i) => i !== index))}
-                            className="grid size-8 shrink-0 place-items-center rounded-lg text-muted-foreground/70 transition hover:bg-destructive/10 hover:text-destructive"
-                            aria-label="Remove core"
-                          >
-                            <Trash2 className="size-3.5" />
-                          </button>
                         </div>
                       );
                     })}
                   </div>
                 )}
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  onClick={() => {
-                    const next = form.cores.length + 1;
-                    handleCoresChange([
-                      ...form.cores,
-                      {
-                        label: `Core ${String(next).padStart(2, '0')}`,
-                        color: FIBRE_COLOR_PALETTE[(next - 1) % FIBRE_COLOR_PALETTE.length],
-                        count: 1,
-                        status: 'damaged' as CoreStatus,
-                      },
-                    ]);
-                  }}
-                  className="h-8 w-full gap-1.5 text-[11px]"
-                >
-                  <Plus className="size-3.5" />
-                  Add core
-                </Button>
               </div>
             </section>
           ) : null}
