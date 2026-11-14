@@ -24,10 +24,9 @@ import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { api, ApiError } from '@/lib/api';
 import { OLT_PHOTO } from '@/lib/photos';
-import type { Area, EthernetPort, EthernetSpeed, Olt, PonPort, PortStatus } from '@/lib/types';
+import type { Area, Olt, PonPort, PortStatus } from '@/lib/types';
 
 const PON_DBM = [3, 5, 7, 9];
-const SPEEDS: EthernetSpeed[] = ['1G', '10G', '40G', '100G'];
 const MAX_PORTS = 64;
 
 interface OltDialogProps {
@@ -41,13 +40,7 @@ interface OltDialogProps {
   onSaved: (olt: Olt, mode: 'create' | 'update') => void;
 }
 
-function detectSpeed(text: string): EthernetSpeed {
-  const match = text.toUpperCase().match(/(100G|40G|10G|1G)/);
-  return (match?.[1] as EthernetSpeed) ?? '10G';
-}
-
 const PON_PREFIX = 'GPON 0/1/';
-const ETHERNET_PREFIX = 'GE 0/0/';
 
 /** Next port name: bump the trailing number of the last named port, else start at 1. */
 function nextPortLabel(rows: { label: string }[], prefix: string): string {
@@ -83,14 +76,6 @@ function initialPonRows(olt?: Olt | null): PonPort[] {
   return [{ label: `${PON_PREFIX}1`, outputDbm: 3 }];
 }
 
-function initialEthernetRows(olt?: Olt | null): EthernetPort[] {
-  if (olt?.ethernetPorts?.length) return olt.ethernetPorts.map((port) => ({ ...port }));
-  if (olt?.uplinkPort) {
-    return [{ label: olt.uplinkPort.split('·')[0].trim(), speed: detectSpeed(olt.uplinkPort) }];
-  }
-  return [{ label: `${ETHERNET_PREFIX}1`, speed: '10G' }];
-}
-
 export function OltDialog({
   open,
   onOpenChange,
@@ -102,7 +87,6 @@ export function OltDialog({
   const [name, setName] = useState('');
   const [code, setCode] = useState('');
   const [ponRows, setPonRows] = useState<PonPort[]>([]);
-  const [ethernetRows, setEthernetRows] = useState<EthernetPort[]>([]);
   const [areaId, setAreaId] = useState('none');
   const [lat, setLat] = useState('');
   const [lng, setLng] = useState('');
@@ -117,7 +101,6 @@ export function OltDialog({
     setName(olt?.name ?? '');
     setCode(olt?.code ?? '');
     setPonRows(initialPonRows(olt));
-    setEthernetRows(initialEthernetRows(olt));
     setAreaId(olt?.areaId ?? defaultAreaId ?? 'none');
     setLat(olt?.lat != null ? String(olt.lat) : draftPoint ? draftPoint.lat.toFixed(6) : '');
     setLng(olt?.lng != null ? String(olt.lng) : draftPoint ? draftPoint.lng.toFixed(6) : '');
@@ -141,10 +124,6 @@ export function OltDialog({
     setPonRows((rows) => rows.map((row, i) => (i === index ? { ...row, ...patch } : row)));
   }
 
-  function updateEthernet(index: number, patch: Partial<EthernetPort>) {
-    setEthernetRows((rows) => rows.map((row, i) => (i === index ? { ...row, ...patch } : row)));
-  }
-
   async function handleSubmit(event: React.FormEvent) {
     event.preventDefault();
     if (name.trim().length < 2) {
@@ -155,11 +134,7 @@ export function OltDialog({
       setError('Name every PON port, or remove the empty row.');
       return;
     }
-    if (ethernetRows.some((row) => !row.label.trim())) {
-      setError('Name every Ethernet port, or remove the empty row.');
-      return;
-    }
-    const vlanOutOfRange = [...ponRows, ...ethernetRows].some(
+    const vlanOutOfRange = ponRows.some(
       (row) =>
         row.vlanId != null &&
         (!Number.isInteger(row.vlanId) || row.vlanId < 1 || row.vlanId > 4094),
@@ -182,11 +157,6 @@ export function OltDialog({
         ponPorts: ponRows.map((row) => ({
           label: row.label.trim(),
           outputDbm: row.outputDbm,
-          vlanId: row.vlanId ?? null,
-        })),
-        ethernetPorts: ethernetRows.map((row) => ({
-          label: row.label.trim(),
-          speed: row.speed,
           vlanId: row.vlanId ?? null,
         })),
         areaId: areaId === 'none' ? null : areaId,
@@ -212,8 +182,7 @@ export function OltDialog({
         <DialogHeader>
           <DialogTitle>{olt ? `Edit ${olt.name}` : 'New OLT'}</DialogTitle>
           <DialogDescription>
-            An OLT carries its PON ports with output power and its Ethernet uplinks. Joints pick an
-            OLT from this list.
+            An OLT carries its PON ports with output power. Joints pick an OLT from this list.
           </DialogDescription>
           {draftPoint && !olt ? (
             <p className="rounded-lg border border-sky-500/30 bg-sky-500/[0.08] px-2.5 py-1.5 font-mono text-[10.5px] text-sky-800 dark:text-sky-200">
@@ -325,87 +294,6 @@ export function OltDialog({
                   aria-label={`Remove PON port ${index + 1}`}
                   disabled={ponRows.length === 1}
                   onClick={() => setPonRows((rows) => rows.filter((_row, i) => i !== index))}
-                >
-                  <X className="size-3.5" />
-                </Button>
-              </div>
-            ))}
-          </section>
-
-          <section className="space-y-2.5 rounded-xl border border-border bg-muted/20 p-3">
-            <div className="flex items-start justify-between gap-2">
-              <div>
-                <p className="text-[12px] font-semibold">Ethernet ports</p>
-                <p className="text-[10px] text-muted-foreground">
-                  {ethernetRows.filter((row) => row.status !== 'in_use').length} of{' '}
-                  {ethernetRows.length} free · uplinks with port speed and VLAN
-                </p>
-              </div>
-              <Button
-                type="button"
-                variant="subtle"
-                size="sm"
-                disabled={ethernetRows.length >= MAX_PORTS}
-                onClick={() =>
-                  setEthernetRows((rows) => [
-                    ...rows,
-                    { label: nextPortLabel(rows, ETHERNET_PREFIX), speed: '10G' },
-                  ])
-                }
-              >
-                <Plus className="size-3.5" />
-                Add port
-              </Button>
-            </div>
-
-            {ethernetRows.map((row, index) => (
-              <div key={`eth-${index}`} className="flex flex-wrap items-center gap-2">
-                <Input
-                  aria-label={`Ethernet port ${index + 1}`}
-                  placeholder="GE 0/0/1"
-                  value={row.label}
-                  onChange={(event) => updateEthernet(index, { label: event.target.value })}
-                  className="h-9 min-w-[120px] flex-1 font-mono text-[11.5px]"
-                />
-                <Select
-                  value={row.speed}
-                  onValueChange={(value) =>
-                    updateEthernet(index, { speed: value as EthernetSpeed })
-                  }
-                >
-                  <SelectTrigger
-                    aria-label={`Ethernet port ${index + 1} speed`}
-                    className="h-9 w-[84px] font-mono text-[11.5px]"
-                  >
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {SPEEDS.map((speed) => (
-                      <SelectItem key={speed} value={speed}>
-                        {speed}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                <Input
-                  aria-label={`Ethernet port ${index + 1} VLAN`}
-                  inputMode="numeric"
-                  placeholder="VLAN"
-                  value={row.vlanId ?? ''}
-                  onChange={(event) => {
-                    const digits = event.target.value.replace(/[^0-9]/g, '').slice(0, 4);
-                    updateEthernet(index, { vlanId: digits ? Number(digits) : null });
-                  }}
-                  className="h-9 w-[76px] font-mono text-[11.5px]"
-                />
-                <PortStatusPill status={row.status} />
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon-sm"
-                  aria-label={`Remove Ethernet port ${index + 1}`}
-                  disabled={ethernetRows.length === 1}
-                  onClick={() => setEthernetRows((rows) => rows.filter((_row, i) => i !== index))}
                 >
                   <X className="size-3.5" />
                 </Button>

@@ -36,13 +36,16 @@ import {
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Separator } from '@/components/ui/separator';
-import type { FibreLink, Tj } from '@/lib/types';
+import type { FibreLink, Olt, Tj } from '@/lib/types';
 import { CorePatchLine, linkPatches, type CorePatch } from '@/components/map/core-patch-line';
 import { cn, formatDistance, totalCores } from '@/lib/utils';
-import { assessOpticalPower, getSplitterLossDb } from '@/lib/optical';
+import { assessOpticalPower, calculateOutputPower, getSplitterLossDb } from '@/lib/optical';
+import { findUpstreamPower, getTjInputCoreLabel } from '@/lib/core-power';
 
 interface TjDetailPanelProps {
   tj: Tj | null;
+  tjs: Tj[];
+  olts: Olt[];
   links: FibreLink[];
   isAdmin: boolean;
   onClose: () => void;
@@ -54,6 +57,8 @@ interface TjDetailPanelProps {
 
 export function TjDetailPanel({
   tj,
+  tjs,
+  olts,
   links,
   isAdmin,
   onClose,
@@ -90,10 +95,16 @@ export function TjDetailPanel({
     tj?.cores?.filter((c) => c.status === 'free').reduce((sum, c) => sum + (Number(c.count) || 0), 0) ?? 0;
   const inUseCoresCount = total - freeCoresCount;
 
-  // Splitter power calculation
+  // Splitter power calculation. Feed power follows the upstream link instead of a
+  // manually entered per-core dBm value.
   const splitterLossDb = tj?.splitter?.ratio ? getSplitterLossDb(tj.splitter.ratio, 0.2) : 0;
-  const inputPower = tj?.splitter?.inputPowerDbm ?? tj?.inputPowerDbm ?? null;
-  const outputPower = tj?.splitter?.outputPowerDbm ?? null;
+  const feedCoreLabel = tj ? getTjInputCoreLabel(tj, links) : null;
+  const upstreamPower = tj ? findUpstreamPower(tj.id, feedCoreLabel, tjs, olts, links) : null;
+  const inputPower = upstreamPower?.powerDbm ?? null;
+  const outputPower =
+    inputPower !== null && tj?.splitter?.enabled && tj.splitter.ratio
+      ? calculateOutputPower(inputPower, tj.splitter.ratio, 0.2)
+      : null;
   const powerAssessment = assessOpticalPower(outputPower);
 
   async function copyCoordinates() {
@@ -331,6 +342,18 @@ export function TjDetailPanel({
                     ) : null}
                   </div>
 
+                  {upstreamPower ? (
+                    <p className="text-[10px] text-muted-foreground">
+                      Feed from {upstreamPower.sourceKind.toUpperCase()} {upstreamPower.sourceCode}
+                      {upstreamPower.sourceCore ? ` · ${upstreamPower.sourceCore}` : ''} via{' '}
+                      {upstreamPower.fibreId}
+                    </p>
+                  ) : (
+                    <p className="text-[10px] text-muted-foreground">
+                      No active upstream link on the feed core — input power appears once it is connected.
+                    </p>
+                  )}
+
                   <div className="grid grid-cols-3 gap-1.5 text-center font-mono">
                     <div className="rounded-xl border border-white/60 bg-white/60 p-1.5 dark:border-white/10 dark:bg-white/[0.04]">
                       <p className="text-[8.5px] font-sans uppercase text-muted-foreground">Input</p>
@@ -447,12 +470,6 @@ export function TjDetailPanel({
                               {isFree ? 'Free' : isDamaged ? 'Cut' : 'In Use'}
                             </span>
 
-                            {core.powerDbm !== null && core.powerDbm !== undefined ? (
-                              <span className="font-mono text-[10px] text-amber-600 dark:text-amber-400">
-                                {core.powerDbm} dBm
-                              </span>
-                            ) : null}
-
                             {core.count > 1 ? (
                               <span className="rounded-md bg-muted px-1.5 py-0.5 font-mono text-[10px] font-semibold text-muted-foreground">
                                 {core.count}×
@@ -516,11 +533,17 @@ export function TjDetailPanel({
                               >
                                 {isFree ? 'Free' : 'In Use'}
                               </span>
-                              {core.powerDbm !== null && core.powerDbm !== undefined ? (
-                                <span className="font-mono text-[10px] font-semibold text-primary">
-                                  {core.powerDbm} dBm
-                                </span>
-                              ) : null}
+                              {(() => {
+                                const legPower =
+                                  tj.splitter?.enabled && outputPower !== null
+                                    ? outputPower
+                                    : core.powerDbm;
+                                return legPower !== null && legPower !== undefined ? (
+                                  <span className="font-mono text-[10px] font-semibold text-primary">
+                                    {legPower} dBm
+                                  </span>
+                                ) : null;
+                              })()}
                             </div>
 
                             {patch ? (

@@ -20,6 +20,8 @@ import { LinkDialog } from '@/components/map/link-dialog';
 import { LinkDetailPanel } from '@/components/map/link-detail-panel';
 import { ConfirmDialog } from '@/components/map/confirm-dialog';
 import { LocationSearch } from '@/components/map/location-search';
+import { MapTransferDialog } from '@/components/map/map-transfer-dialog';
+import { MapExportDialog } from '@/components/map/map-export-dialog';
 
 import { Button } from '@/components/ui/button';
 import { BrandMark } from '@/components/brand';
@@ -37,7 +39,14 @@ import type {
 } from '@/lib/types';
 import type { MapMode } from '@/components/map/network-map';
 import type { SearchResultItem } from '@/lib/geocoding';
-import { cn } from '@/lib/utils';
+import {
+  createMapTransfer,
+  downloadMapTransfer,
+  importMapTransfer,
+  mapTransferFilename,
+  type MapTransferFile,
+} from '@/lib/map-transfer';
+import { cn, formatDistance } from '@/lib/utils';
 
 const NetworkMap = dynamic(
   () => import('@/components/map/network-map').then((module) => ({ default: module.NetworkMap })),
@@ -146,6 +155,8 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
   const [tjToDelete, setTjToDelete] = useState<Tj | null>(null);
   const [linkToDelete, setLinkToDelete] = useState<FibreLink | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [transferOpen, setTransferOpen] = useState(false);
+  const [exportOpen, setExportOpen] = useState(false);
 
   const selectedTj = useMemo(
     () => tjs.find((tj) => tj.id === selectedTjId) ?? null,
@@ -395,6 +406,55 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
     setMode('idle');
   }, []);
 
+  const openExport = useCallback(() => {
+    if (!data) {
+      toast.error('The map is still loading', { description: 'Try exporting again in a moment.' });
+      return;
+    }
+    setExportOpen(true);
+  }, [data]);
+
+  const exportMap = useCallback(
+    (fileName: string) => {
+      if (!data) return;
+      const snapshot = createMapTransfer(
+        { olts, tjs, links, onus },
+        area ? { id: area.id, name: `${area.districtName} · ${area.name}` } : null,
+      );
+      downloadMapTransfer(snapshot, mapTransferFilename(area?.name ?? null, fileName));
+      toast.success('Map exported', {
+        description: `${snapshot.olts.length} OLT · ${snapshot.tjs.length} TJ · ${snapshot.onus.length} ONU · ${snapshot.links.length} links`,
+      });
+    },
+    [data, olts, tjs, links, onus, area],
+  );
+
+  const importMap = useCallback(
+    async (file: MapTransferFile, options: { replace: boolean }) => {
+      // Codes are unique across the whole network, so load the full inventory and
+      // suffix any imported code/name that is already in use.
+      const scope = await api.network();
+      const result = await importMapTransfer(
+        file,
+        areaId ?? null,
+        { tjs: scope.tjs, olts: scope.olts },
+        {
+          replaceExisting: options.replace,
+          current: { tjs, olts, onus, links },
+        },
+      ).catch(async (error: unknown) => {
+        // A replace can fail midway; refresh so a retry starts from the real state.
+        await mutate();
+        throw error;
+      });
+      await mutate();
+      toast.success(options.replace ? 'Map replaced' : 'Map imported', {
+        description: `${result.olts} OLT · ${result.tjs} TJ · ${result.onus} ONU · ${result.links} links${result.removed > 0 ? ` · ${result.removed} old device${result.removed === 1 ? '' : 's'} removed` : ''}${result.renamed > 0 ? ` · ${result.renamed} code${result.renamed === 1 ? '' : 's'} adjusted` : ''}${result.skippedLinks > 0 ? ` · ${result.skippedLinks} link${result.skippedLinks === 1 ? '' : 's'} skipped` : ''}`,
+      });
+    },
+    [areaId, tjs, olts, onus, links, mutate],
+  );
+
   // Draw the cable route on the map. The dialog stays mounted (hidden) so the
   // half-filled link form survives the trip to the map and back.
   const startLinkDraw = useCallback(() => {
@@ -508,12 +568,98 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
     [mutate, joinRestoreLink],
   );
 
+  const handleDeviceMove = useCallback(
+    async (move: { kind: 'tj' | 'olt' | 'onu'; id: string; lat: number; lng: number }) => {
+      const deviceCode =
+        move.kind === 'tj'
+          ? tjs.find((item) => item.id === move.id)?.code
+          : move.kind === 'olt'
+            ? olts.find((item) => item.id === move.id)?.code
+            : onus.find((item) => item.id === move.id)?.username;
+      try {
+        if (move.kind === 'tj') {
+          await api.updateTj(move.id, { lat: move.lat, lng: move.lng });
+        } else if (move.kind === 'olt') {
+          await api.updateOlt(move.id, { lat: move.lat, lng: move.lng });
+        } else {
+          await api.updateOnu(move.id, { lat: move.lat, lng: move.lng });
+        }
+
+        // Lengths are stored on the link; touching each attached span recomputes
+        // it against the device's new coordinates on the server.
+        const attached = links.filter(
+          (link) =>
+            (move.kind === 'tj' &&
+              (link.fromTjId === move.id || link.toTjId === move.id)) ||
+            (move.kind === 'olt' &&
+              (link.fromOltId === move.id || link.toOltId === move.id)) ||
+            (move.kind === 'onu' &&
+              (link.fromOnuId === move.id || link.toOnuId === move.id)),
+        );
+        await Promise.all(attached.map((link) => api.updateLink(link.id, { path: link.path })));
+
+        await mutate();
+        toast.success(`${deviceCode ?? 'Device'} moved`, {
+          description: 'Coordinates and fibre lengths updated.',
+        });
+      } catch (err) {
+        toast.error(err instanceof ApiError ? err.message : 'Could not move this device');
+        await mutate();
+      }
+    },
+    [tjs, olts, onus, links, mutate],
+  );
+
+  const handleMoveLinkPath = useCallback(
+    async (id: string, path: { lat: number; lng: number }[]) => {
+      try {
+        const updated = await api.updateLink(id, { path });
+        await mutate();
+        toast.success(`Link ${updated.fibreId} rerouted`, {
+          description: `${formatDistance(updated.lengthM)} of fibre.`,
+        });
+      } catch (err) {
+        toast.error(err instanceof ApiError ? err.message : 'Could not move this link');
+        await mutate();
+      }
+    },
+    [mutate],
+  );
+
   const handleLinkSaved = useCallback(
     async (saved: FibreLink) => {
+      // A link into a TJ's feed core is that joint's input cable, so carry its
+      // fibre ID onto the joint without making the user retype it.
+      const sides = [
+        { tjId: saved.fromTjId, side: 'from' as const },
+        { tjId: saved.toTjId, side: 'to' as const },
+      ];
+      for (const { tjId, side } of sides) {
+        if (!tjId) continue;
+        const tj = tjs.find((item) => item.id === tjId);
+        if (!tj || tj.fibreId === saved.fibreId) continue;
+        const localCores = (saved.cores ?? [])
+          .map((core) => (side === 'from' ? core.fromCoreLabel : core.toCoreLabel))
+          .filter((label): label is string => Boolean(label));
+        const direct = side === 'from' ? saved.fromCoreLabel : saved.toCoreLabel;
+        if (direct && !localCores.includes(direct)) localCores.push(direct);
+        const feed = tj.splitter?.enabled ? tj.splitter.inputCoreLabel : null;
+        // With no core labels on the link there is nothing to compare, so the
+        // cable attached to the joint is still taken as its input fibre.
+        const shouldAssign = feed
+          ? localCores.length === 0 || localCores.includes(feed)
+          : !tj.fibreId || localCores.length === 0;
+        if (!shouldAssign) continue;
+        try {
+          await api.updateTj(tj.id, { fibreId: saved.fibreId });
+        } catch {
+          // The link itself is saved; failing to sync the label must not undo it.
+        }
+      }
       setSelectedLinkId(saved.id);
       await mutate();
     },
-    [mutate],
+    [mutate, tjs],
   );
 
   const handleLinkFrom = useCallback((tj: Tj) => {
@@ -606,6 +752,8 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
           contextLabel={area ? `${area.districtName} · ${area.name}` : undefined}
           sidebarOpen={!sidebarCollapsed}
           onToggleSidebar={() => setSidebarCollapsed((c) => !c)}
+          onExportMap={openExport}
+          onImportMap={isAdmin ? () => setTransferOpen(true) : undefined}
           back={
             areaId
               ? { href: area ? `/districts/${area.districtId}` : '/', label: area ? area.districtName : 'Districts' }
@@ -669,6 +817,9 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
               onClearPinnedLocation={handleClearPinnedLocation}
               onAddTjAtPinnedLocation={handleAddTjAtPinnedLocation}
               onAddOltAtPinnedLocation={handleAddOltAtPinnedLocation}
+              canMoveDevices={isAdmin}
+              onMoveDevice={handleDeviceMove}
+              onMoveLinkPath={handleMoveLinkPath}
             />
 
             <LocationSearch
@@ -869,8 +1020,32 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
         }}
       />
 
+      <MapExportDialog
+        open={exportOpen}
+        onOpenChange={setExportOpen}
+        defaultFileName={mapTransferFilename(area?.name ?? null)}
+        counts={{ olts: olts.length, tjs: tjs.length, onus: onus.length, links: links.length }}
+        onExport={exportMap}
+      />
+
+      <MapTransferDialog
+        open={transferOpen}
+        onOpenChange={setTransferOpen}
+        targetLabel={area ? `${area.districtName} · ${area.name}` : null}
+        targetAreaId={areaId ?? null}
+        currentCounts={{
+          olts: olts.length,
+          tjs: tjs.length,
+          onus: onus.length,
+          links: links.length,
+        }}
+        onImport={importMap}
+      />
+
       <OnuDetailPanel
         onu={selectedOnu}
+        tjs={tjs}
+        olts={olts}
         links={links}
         isAdmin={isAdmin}
         onClose={() => setSelectedOnuId(null)}
@@ -882,6 +1057,8 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
 
       <TjDetailPanel
         tj={selectedTj}
+        tjs={tjs}
+        olts={olts}
         links={links}
         isAdmin={isAdmin}
         onClose={() => setSelectedTjId(null)}
@@ -915,6 +1092,9 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
         createTjType={createTjType}
         prefillCores={prefillTjCores}
         prefillFibreId={prefillTjFibreId}
+        tjs={tjs}
+        olts={olts}
+        links={links}
         onSaved={handleTjSaved}
       />
 

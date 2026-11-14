@@ -113,6 +113,116 @@ export const SPLITTER_RATIO_PRESETS: Record<SplitRatio, RatioLossInfo> = {
   },
 };
 
+export type OnuClass =
+  | 'A'
+  | 'B'
+  | 'B+'
+  | 'C'
+  | 'C+'
+  | 'C++'
+  | 'PX10'
+  | 'PX20'
+  | 'PX30';
+
+export type PonType = 'epon' | 'gpon';
+
+export interface OnuClassInfo {
+  ponType: PonType;
+  onuClass: OnuClass;
+  label: string;
+  /** ODN channel insertion loss window the optic supports, in dB. */
+  minLossDb: number;
+  maxLossDb: number;
+  /** Minimum ONU receive power before the link drops, in dBm. */
+  sensitivityDbm: number;
+  /** Maximum ONU receive power before the receiver saturates, in dBm. */
+  overloadDbm: number;
+}
+
+/**
+ * ODN loss windows and receiver limits for the ONU optic classes used on EPON and GPON
+ * access networks. Loss windows follow ITU-T G.984.2 (GPON) and IEEE 802.3ah/802.3av
+ * (EPON, 10G-EPON); the PX classes are the extended EPON budget classes.
+ */
+export const ONU_CLASS_PRESETS: Record<OnuClass, Omit<OnuClassInfo, 'ponType' | 'onuClass'>> = {
+  A: {
+    label: 'Class A',
+    minLossDb: 5,
+    maxLossDb: 20,
+    sensitivityDbm: -24,
+    overloadDbm: -3,
+  },
+  B: {
+    label: 'Class B',
+    minLossDb: 10,
+    maxLossDb: 25,
+    sensitivityDbm: -27,
+    overloadDbm: -6,
+  },
+  'B+': {
+    label: 'Class B+',
+    minLossDb: 13,
+    maxLossDb: 28,
+    sensitivityDbm: -27,
+    overloadDbm: -8,
+  },
+  C: {
+    label: 'Class C',
+    minLossDb: 15,
+    maxLossDb: 30,
+    sensitivityDbm: -30,
+    overloadDbm: -8,
+  },
+  'C+': {
+    label: 'Class C+',
+    minLossDb: 17,
+    maxLossDb: 32,
+    sensitivityDbm: -30,
+    overloadDbm: -10,
+  },
+  'C++': {
+    label: 'Class C++',
+    minLossDb: 20,
+    maxLossDb: 35,
+    sensitivityDbm: -32,
+    overloadDbm: -12,
+  },
+  PX10: {
+    label: 'PX10',
+    minLossDb: 5,
+    maxLossDb: 20,
+    sensitivityDbm: -24,
+    overloadDbm: -3,
+  },
+  PX20: {
+    label: 'PX20',
+    minLossDb: 10,
+    maxLossDb: 24,
+    sensitivityDbm: -27,
+    overloadDbm: -6,
+  },
+  PX30: {
+    label: 'PX30',
+    minLossDb: 15,
+    maxLossDb: 29,
+    sensitivityDbm: -30,
+    overloadDbm: -8,
+  },
+};
+
+export const ONU_CLASS_OPTIONS = Object.keys(ONU_CLASS_PRESETS) as OnuClass[];
+
+/** Resolves the stored PON type + class into its ODN budget window; falls back to GPON B+. */
+export function getOnuClassInfo(
+  ponType: string | null | undefined,
+  onuClass: string | null | undefined,
+): OnuClassInfo {
+  const type: PonType = ponType === 'epon' ? 'epon' : 'gpon';
+  const key = (onuClass ?? '').toUpperCase();
+  const resolved = (ONU_CLASS_PRESETS[key as OnuClass] ? key : 'B+') as OnuClass;
+  return { ponType: type, onuClass: resolved, ...ONU_CLASS_PRESETS[resolved] };
+}
+
 export type OpticalPowerQuality = 'optimal' | 'marginal' | 'critical' | 'overload';
 
 export interface PowerAssessment {

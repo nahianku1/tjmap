@@ -149,60 +149,6 @@ export function OltDetailPanel({
 
               <div className="rounded-2xl border border-white/55 bg-white/45 p-3 dark:border-white/[0.06] dark:bg-white/[0.02]">
                 <div className="flex items-center justify-between gap-2">
-                  <p className="text-[8.5px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
-                    Ethernet ports
-                  </p>
-                  <span className="font-mono text-[10px] text-muted-foreground">
-                    {olt.ethernetPorts.filter((port) => port.status !== 'in_use').length} free ·{' '}
-                    {olt.ethernetPorts.length}
-                  </span>
-                </div>
-                {olt.ethernetPorts.length > 0 ? (
-                  <ul className="mt-1.5 space-y-1">
-                    {olt.ethernetPorts.map((port, index) => (
-                      <li
-                        key={`${port.label}-${index}`}
-                        className="font-mono text-[11.5px]"
-                      >
-                        <div className="flex items-center justify-between gap-2">
-                          <span className="truncate font-semibold">{port.label}</span>
-                          <span className="flex shrink-0 items-center gap-1.5">
-                            <span className="rounded border border-teal-500/35 bg-teal-500/10 px-1.5 py-0.5 text-[9.5px] font-semibold text-teal-700 dark:text-teal-300">
-                              {port.speed}
-                            </span>
-                            {port.vlanId != null ? (
-                              <span className="rounded border border-violet-500/35 bg-violet-500/10 px-1.5 py-0.5 text-[9.5px] font-semibold text-violet-700 dark:text-violet-300">
-                                VLAN {port.vlanId}
-                              </span>
-                            ) : null}
-                            <span
-                              className={`rounded px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide ${
-                                port.status === 'in_use'
-                                  ? 'bg-amber-500/15 text-amber-700 dark:text-amber-300'
-                                  : 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300'
-                              }`}
-                            >
-                              {port.status === 'in_use' ? 'In use' : 'Free'}
-                            </span>
-                          </span>
-                        </div>
-                        {patches.get(port.label) ? (
-                          <CorePatchLine
-                            localCode={olt.code}
-                            localCore={port.label}
-                            patch={patches.get(port.label)!}
-                          />
-                        ) : null}
-                      </li>
-                    ))}
-                  </ul>
-                ) : (
-                  <p className="mt-1 font-mono text-[12.5px] font-semibold">{olt.uplinkPort ?? '—'}</p>
-                )}
-              </div>
-
-              <div className="rounded-2xl border border-white/55 bg-white/45 p-3 dark:border-white/[0.06] dark:bg-white/[0.02]">
-                <div className="flex items-center justify-between gap-2">
                   <p className="inline-flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">
                     <MapPin className="size-3 text-primary" />
                     Coordinates &amp; Area

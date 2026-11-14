@@ -32,6 +32,7 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Separator } from '@/components/ui/separator';
 import type { DeviceKind, FibreLink } from '@/lib/types';
+import { computeSpanLoss } from '@/lib/power-budget';
 import { cn, formatDistance } from '@/lib/utils';
 
 interface LinkDetailPanelProps {
@@ -86,10 +87,15 @@ export function LinkDetailPanel({
 
   const path = link?.path ?? [];
   const isCut = link?.status === 'cut';
+  const spanLoss = useMemo(() => (link ? computeSpanLoss(link) : null), [link]);
 
   return (
-    <Sheet open={Boolean(link)} onOpenChange={(open) => (!open ? onClose() : undefined)}>
-      <SheetContent className="max-w-md">
+    <Sheet
+      open={Boolean(link)}
+      modal={false}
+      onOpenChange={(open) => (!open ? onClose() : undefined)}
+    >
+      <SheetContent hideOverlay className="max-w-md">
         {link ? (
           <>
             <SheetHeader>
@@ -102,6 +108,18 @@ export function LinkDetailPanel({
                   <Link2 className="size-3" />
                   {link.fibreId}
                 </span>
+                {link.color ? (
+                  <span
+                    className="inline-flex items-center gap-1 rounded-md border border-white/60 bg-white/50 px-2 py-0.5 font-mono text-[10px] text-muted-foreground dark:border-white/10 dark:bg-white/[0.06]"
+                    title="Custom link colour"
+                  >
+                    <span
+                      className="size-2.5 rounded-full border border-white/60 dark:border-white/20"
+                      style={{ backgroundColor: link.color }}
+                    />
+                    {link.color.toUpperCase()}
+                  </span>
+                ) : null}
                 {!isAdmin ? <Badge variant="outline">Read only</Badge> : null}
               </div>
 
@@ -146,6 +164,41 @@ export function LinkDetailPanel({
                   accent="text-amber-500"
                 />
               </div>
+
+              {/* OPTICAL SPAN LOSS */}
+              {spanLoss ? (
+                <section className="rounded-2xl border border-amber-500/25 bg-amber-500/[0.04] p-3">
+                  <div className="mb-2 flex items-center justify-between gap-2">
+                    <p className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">
+                      <Ruler className="size-3 text-amber-500" />
+                      Span loss
+                    </p>
+                    <span className="font-mono text-[12px] font-semibold text-amber-700 dark:text-amber-300">
+                      {spanLoss.totalLossDb.toFixed(2)} dB
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-3 gap-1.5 text-center font-mono">
+                    <div className="rounded-xl border border-white/60 bg-white/60 p-1.5 dark:border-white/10 dark:bg-white/[0.04]">
+                      <p className="text-[8.5px] font-sans uppercase text-muted-foreground">Fibre</p>
+                      <p className="text-[11.5px] font-semibold">{spanLoss.fibreLossDb.toFixed(2)} dB</p>
+                    </div>
+                    <div className="rounded-xl border border-white/60 bg-white/60 p-1.5 dark:border-white/10 dark:bg-white/[0.04]">
+                      <p className="text-[8.5px] font-sans uppercase text-muted-foreground">Splices</p>
+                      <p className="text-[11.5px] font-semibold">{spanLoss.spliceLossDb.toFixed(2)} dB</p>
+                    </div>
+                    <div className="rounded-xl border border-white/60 bg-white/60 p-1.5 dark:border-white/10 dark:bg-white/[0.04]">
+                      <p className="text-[8.5px] font-sans uppercase text-muted-foreground">Connectors</p>
+                      <p className="text-[11.5px] font-semibold">
+                        {spanLoss.connectionLossDb.toFixed(2)} dB
+                      </p>
+                    </div>
+                  </div>
+                  <p className="mt-2 text-[10px] text-muted-foreground">
+                    {spanLoss.attenuationDbPerKm} dB/km · {spanLoss.spliceCount} splice
+                    {spanLoss.spliceCount === 1 ? '' : 's'} · {formatDistance(link.lengthM)} of fibre
+                  </p>
+                </section>
+              ) : null}
 
               {/* ENDPOINTS */}
               <section className="rounded-2xl border border-white/60 bg-white/45 p-3 dark:border-white/10 dark:bg-white/[0.03]">

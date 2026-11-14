@@ -1,7 +1,16 @@
 'use client';
 
 import Link from 'next/link';
-import { ChevronLeft, PanelLeftClose, PanelLeftOpen, Radio, Scissors, Waypoints } from 'lucide-react';
+import {
+  ChevronLeft,
+  Download,
+  PanelLeftClose,
+  PanelLeftOpen,
+  Radio,
+  Scissors,
+  Upload,
+  Waypoints,
+} from 'lucide-react';
 import { Brand, BrandMark } from '@/components/brand';
 import { ThemeToggle } from '@/components/theme-toggle';
 import { UserMenu } from './user-menu';
@@ -16,6 +25,10 @@ interface TopbarProps {
   back?: { href: string; label: string };
   sidebarOpen?: boolean;
   onToggleSidebar?: () => void;
+  /** Downloads the current map as a JSON snapshot. */
+  onExportMap?: () => void;
+  /** Opens the import dialog; omitted for viewers. */
+  onImportMap?: () => void;
 }
 
 export function Topbar({
@@ -26,6 +39,8 @@ export function Topbar({
   back,
   sidebarOpen = true,
   onToggleSidebar,
+  onExportMap,
+  onImportMap,
 }: TopbarProps) {
   return (
     <header className="relative z-20 flex h-[58px] shrink-0 items-center gap-2 border-b border-white/40 px-3 sm:h-16 sm:gap-3 sm:px-4 dark:border-white/[0.06]">
@@ -106,6 +121,29 @@ export function Topbar({
             {cutCount}
           </span>
         </div>
+
+        {onExportMap ? (
+          <button
+            type="button"
+            onClick={onExportMap}
+            title="Export map as JSON"
+            aria-label="Export map"
+            className="grid size-9 shrink-0 place-items-center rounded-xl border border-white/60 bg-white/50 text-muted-foreground shadow-sm transition hover:border-primary/40 hover:bg-white/80 hover:text-foreground active:scale-95 dark:border-white/10 dark:bg-white/[0.05] dark:hover:bg-white/[0.1]"
+          >
+            <Download className="size-4" />
+          </button>
+        ) : null}
+        {onImportMap ? (
+          <button
+            type="button"
+            onClick={onImportMap}
+            title="Import a map snapshot"
+            aria-label="Import map"
+            className="grid size-9 shrink-0 place-items-center rounded-xl border border-white/60 bg-white/50 text-muted-foreground shadow-sm transition hover:border-violet-400/50 hover:bg-white/80 hover:text-foreground active:scale-95 dark:border-white/10 dark:bg-white/[0.05] dark:hover:bg-white/[0.1]"
+          >
+            <Upload className="size-4" />
+          </button>
+        ) : null}
 
         <ThemeToggle />
         <UserMenu />

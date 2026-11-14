@@ -13,11 +13,18 @@ function SheetContent({
   className,
   children,
   showClose = true,
+  hideOverlay = false,
   ...props
-}: React.ComponentProps<typeof DialogPrimitive.Content> & { showClose?: boolean }) {
+}: React.ComponentProps<typeof DialogPrimitive.Content> & {
+  showClose?: boolean;
+  /** Keep the map underneath interactive, e.g. while editing link bends. */
+  hideOverlay?: boolean;
+}) {
   return (
     <DialogPrimitive.Portal>
-      <DialogPrimitive.Overlay className="dialog-overlay fixed inset-0 z-50 bg-slate-950/45 backdrop-blur-[3px]" />
+      {hideOverlay ? null : (
+        <DialogPrimitive.Overlay className="dialog-overlay fixed inset-0 z-50 bg-slate-950/45 backdrop-blur-[3px]" />
+      )}
       <DialogPrimitive.Content
         className={cn(
           'sheet-content fixed right-0 top-0 z-50 flex h-full w-full flex-col border-l border-white/60 bg-white/95 shadow-2xl backdrop-blur-2xl sm:top-3 sm:right-3 sm:h-[calc(100%-1.5rem)] sm:w-[420px] sm:rounded-3xl sm:border dark:border-white/10 dark:bg-[#080d18]/95',

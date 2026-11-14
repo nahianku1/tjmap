@@ -24,7 +24,8 @@ import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { CoreEditor } from '@/components/map/core-editor';
 import { api, ApiError } from '@/lib/api';
-import type { Area, Core, Onu } from '@/lib/types';
+import { ONU_CLASS_OPTIONS, getOnuClassInfo } from '@/lib/optical';
+import type { Area, Core, Onu, OnuClass, PonType } from '@/lib/types';
 
 interface OnuDialogProps {
   open: boolean;
@@ -69,6 +70,8 @@ export function OnuDialog({
   const [macAddress, setMacAddress] = useState('');
   const [vlanId, setVlanId] = useState('');
   const [fibreId, setFibreId] = useState('');
+  const [ponType, setPonType] = useState<PonType>('gpon');
+  const [onuClass, setOnuClass] = useState<OnuClass>('B+');
   const [cores, setCores] = useState<Core[]>([defaultCore(1)]);
   const [areaId, setAreaId] = useState('none');
   const [lat, setLat] = useState('');
@@ -85,6 +88,8 @@ export function OnuDialog({
     setMacAddress(onu?.macAddress ?? '');
     setVlanId(onu?.vlanId != null ? String(onu.vlanId) : '');
     setFibreId(onu?.fibreId ?? '');
+    setPonType(onu?.ponType === 'epon' ? 'epon' : 'gpon');
+    setOnuClass(getOnuClassInfo(onu?.ponType, onu?.onuClass).onuClass);
     setCores(
       onu?.cores?.length
         ? onu.cores.map((core) => ({
@@ -154,6 +159,8 @@ export function OnuDialog({
         fibreId: fid,
         macAddress: mac || undefined,
         vlanId: parsedVlanId,
+        ponType,
+        onuClass,
         cores: cores.map((core) => ({
           label: core.label.trim() || 'Core',
           color: core.color || PALETTE[0],
@@ -235,7 +242,7 @@ export function OnuDialog({
                 className="font-mono text-[12px]"
               />
             </div>
-            <div className="space-y-1.5">
+            <div className="space-y-1.5 sm:col-span-2">
               <Label htmlFor="onu-fibre-id">Fibre ID</Label>
               <Input
                 id="onu-fibre-id"
@@ -245,6 +252,41 @@ export function OnuDialog({
                 onChange={(e) => setFibreId(e.target.value)}
                 className="font-mono text-[12px]"
               />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="onu-pon-type">PON technology</Label>
+              <Select value={ponType} onValueChange={(value) => setPonType(value as PonType)}>
+                <SelectTrigger id="onu-pon-type">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="gpon">GPON</SelectItem>
+                  <SelectItem value="epon">EPON</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="onu-class">ONU class</Label>
+              <Select value={onuClass} onValueChange={(value) => setOnuClass(value as OnuClass)}>
+                <SelectTrigger id="onu-class">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {ONU_CLASS_OPTIONS.map((option) => {
+                    const info = getOnuClassInfo(ponType, option);
+                    return (
+                      <SelectItem key={option} value={option}>
+                        {info.label} · {info.minLossDb}–{info.maxLossDb} dB
+                      </SelectItem>
+                    );
+                  })}
+                </SelectContent>
+              </Select>
+              <p className="text-[10px] text-muted-foreground">
+                ODN window {getOnuClassInfo(ponType, onuClass).minLossDb}–
+                {getOnuClassInfo(ponType, onuClass).maxLossDb} dB · Rx sensitivity{' '}
+                {getOnuClassInfo(ponType, onuClass).sensitivityDbm} dBm
+              </p>
             </div>
             <div className="space-y-1.5 sm:col-span-2">
               <Label htmlFor="onu-area">Service area</Label>

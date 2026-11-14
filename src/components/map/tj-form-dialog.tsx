@@ -51,6 +51,7 @@ import type {
   CoreStatus,
   CutRepairStatus,
   CutSeverity,
+  FibreLink,
   Olt,
   Tj,
   TjInput,
@@ -65,6 +66,11 @@ import {
   SPLITTER_RATIO_PRESETS,
   SplitRatio,
 } from '@/lib/optical';
+import {
+  findLinkedFibreId,
+  findUpstreamPower,
+  getTjInputCoreLabel,
+} from '@/lib/core-power';
 import { cn } from '@/lib/utils';
 
 interface TjFormDialogProps {
@@ -77,6 +83,10 @@ interface TjFormDialogProps {
   createTjType?: 'box' | 'cut' | null;
   prefillCores?: Core[] | null;
   prefillFibreId?: string | null;
+  /** Devices on this map, used to read upstream optical power through the links. */
+  tjs: Tj[];
+  olts: Olt[];
+  links: FibreLink[];
   onSaved: (tj: Tj, mode: 'create' | 'update') => void;
 }
 
@@ -147,10 +157,10 @@ const EMPTY_FORM: FormState = {
   lng: '',
   notes: '',
   cores: [
-    { label: 'Core 01', color: '#22d3ee', count: 1, status: 'free', powerDbm: 3.0 },
-    { label: 'Core 02', color: '#34d399', count: 1, status: 'free', powerDbm: 2.8 },
-    { label: 'Core 03', color: '#a78bfa', count: 1, status: 'free', powerDbm: null },
-    { label: 'Core 04', color: '#fbbf24', count: 1, status: 'free', powerDbm: null },
+    { label: 'Core 01', color: '#22d3ee', count: 1, status: 'free' },
+    { label: 'Core 02', color: '#34d399', count: 1, status: 'free' },
+    { label: 'Core 03', color: '#a78bfa', count: 1, status: 'free' },
+    { label: 'Core 04', color: '#fbbf24', count: 1, status: 'free' },
   ],
   outputCores: [],
   userFibres: [],
@@ -181,11 +191,13 @@ export function TjFormDialog({
   createTjType,
   prefillCores,
   prefillFibreId,
+  tjs,
+  olts,
+  links,
   onSaved,
 }: TjFormDialogProps) {
   const [form, setForm] = useState<FormState>(EMPTY_FORM);
   const [areas, setAreas] = useState<Area[]>([]);
-  const [olts, setOlts] = useState<Olt[]>([]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [splitterError, setSplitterError] = useState<string | null>(null);
@@ -193,11 +205,14 @@ export function TjFormDialog({
   useEffect(() => {
     if (!open) return;
     let cancelled = false;
-    Promise.allSettled([api.areas(), api.olts()]).then((results) => {
-      if (cancelled) return;
-      setAreas(results[0].status === 'fulfilled' ? results[0].value : []);
-      setOlts(results[1].status === 'fulfilled' ? results[1].value : []);
-    });
+    api
+      .areas()
+      .then((list) => {
+        if (!cancelled) setAreas(list);
+      })
+      .catch(() => {
+        if (!cancelled) setAreas([]);
+      });
     return () => {
       cancelled = true;
     };
@@ -283,14 +298,32 @@ export function TjFormDialog({
     setForm((current) => ({ ...current, ...values }));
   }
 
-  // Optical power calculation for splitter from the connected input core
-  const connectedCore = form.cores.find((c) => c.label === form.inputCoreLabel);
-  const inputPowerNum =
-    connectedCore?.powerDbm !== null &&
-    connectedCore?.powerDbm !== undefined &&
-    Number.isFinite(Number(connectedCore.powerDbm))
-      ? Number(connectedCore.powerDbm)
-      : null;
+  // Feed power is no longer entered per core. It is read from the upstream device
+  // (OLT PON port or upstream splitter leg) through the link patched to the feed core.
+  const linkedFeed = initial ? getTjInputCoreLabel(initial, links) : null;
+  const powerCoreLabel = form.splitterEnabled
+    ? form.inputCoreLabel || linkedFeed
+    : linkedFeed;
+  const upstreamPower = initial
+    ? findUpstreamPower(initial.id, powerCoreLabel, tjs, olts, links)
+    : null;
+  const inputPowerNum = upstreamPower?.powerDbm ?? null;
+  // The input cable is whatever links into the feed core; its fibre ID follows the link.
+  const inputFibreId = initial
+    ? findLinkedFibreId(initial.id, powerCoreLabel, links)
+    : null;
+
+  useEffect(() => {
+    if (!inputFibreId) return;
+    setForm((current) =>
+      current.fibreId === inputFibreId ? current : { ...current, fibreId: inputFibreId },
+    );
+  }, [inputFibreId]);
+
+  function upstreamPowerDbm(coreLabel: string | null): number | null {
+    if (!initial || !coreLabel) return null;
+    return findUpstreamPower(initial.id, coreLabel, tjs, olts, links)?.powerDbm ?? null;
+  }
 
   const splitterLossDb = getSplitterLossDb(form.ratio, 0.2);
   const outputPowerDbm =
@@ -298,6 +331,21 @@ export function TjFormDialog({
       ? calculateOutputPower(inputPowerNum, form.ratio, 0.2)
       : null;
   const powerAssessment = assessOpticalPower(outputPowerDbm);
+
+  // Keep every splitter leg's stored power in step with the auto-derived output.
+  useEffect(() => {
+    if (!form.splitterEnabled) return;
+    setForm((current) => {
+      const unchanged = current.outputCores.every(
+        (core) => (core.powerDbm ?? null) === outputPowerDbm,
+      );
+      if (unchanged) return current;
+      return {
+        ...current,
+        outputCores: current.outputCores.map((core) => ({ ...core, powerDbm: outputPowerDbm })),
+      };
+    });
+  }, [form.splitterEnabled, outputPowerDbm]);
 
   // Helper to generate optical output cores based on split ratio
   function generateSplitterOutputs(ratio: SplitRatio, power: number | null): Core[] {
@@ -365,13 +413,8 @@ export function TjFormDialog({
         c.label === freeCore.label ? { ...c, status: 'in_use' as const } : c,
       );
 
-      // Derive initial output power from the selected free core's individual powerDbm
-      const feedPower =
-        freeCore.powerDbm !== null &&
-        freeCore.powerDbm !== undefined &&
-        Number.isFinite(Number(freeCore.powerDbm))
-          ? Number(freeCore.powerDbm)
-          : null;
+      // Derive initial output power from the power arriving on that core's link
+      const feedPower = upstreamPowerDbm(freeCore.label);
       const initialOutPower =
         feedPower !== null ? calculateOutputPower(feedPower, form.ratio, 0.2) : null;
 
@@ -450,13 +493,8 @@ export function TjFormDialog({
       return c;
     });
 
-    // Recalculate output power based on the new feeding core's power
-    const targetPower =
-      target.powerDbm !== null &&
-      target.powerDbm !== undefined &&
-      Number.isFinite(Number(target.powerDbm))
-        ? Number(target.powerDbm)
-        : null;
+    // Recalculate output power from the new feeding core's upstream link
+    const targetPower = upstreamPowerDbm(selectedLabel);
     const newOutPower =
       targetPower !== null ? calculateOutputPower(targetPower, form.ratio, 0.2) : null;
 
@@ -477,8 +515,8 @@ export function TjFormDialog({
     );
   }
 
-  // Handle cores list update from CoreEditor:
-  // If feeding core's power changed, automatically recalculate output powers!
+  // Handle cores list update from CoreEditor: recalculate the splitter outputs
+  // whenever the feeding core (or its upstream link) changes.
   function handleCoresChange(newCores: Core[]) {
     let err = splitterError;
     const feedCore = newCores.find((c) => c.label === form.inputCoreLabel);
@@ -493,13 +531,8 @@ export function TjFormDialog({
       }
     }
 
-    // Automatically calculate new output power for splitter if this core's power changed
-    const feedPower =
-      feedCore?.powerDbm !== null &&
-      feedCore?.powerDbm !== undefined &&
-      Number.isFinite(Number(feedCore.powerDbm))
-        ? Number(feedCore.powerDbm)
-        : null;
+    // Automatically calculate new output power from the feed core's upstream link
+    const feedPower = upstreamPowerDbm(form.inputCoreLabel);
 
     const calculatedOutPower =
       feedPower !== null ? calculateOutputPower(feedPower, form.ratio, 0.2) : null;
@@ -844,6 +877,8 @@ export function TjFormDialog({
         ...core,
         count: 1,
         status: core.status ?? 'free',
+        // Input power is derived from the linked upstream device, never stored here.
+        powerDbm: null,
       })),
       outputCores: form.outputCores.map((core) => ({
         ...core,
@@ -1010,8 +1045,17 @@ export function TjFormDialog({
                 placeholder="F-DHK-GL-09"
                 value={form.fibreId}
                 onChange={(event) => patch({ fibreId: event.target.value })}
-                className="font-mono text-[12px]"
+                readOnly={Boolean(inputFibreId)}
+                className={cn(
+                  'font-mono text-[12px]',
+                  inputFibreId && 'bg-muted/40 text-muted-foreground',
+                )}
               />
+              <p className="text-[9.5px] text-muted-foreground">
+                {inputFibreId
+                  ? 'Assigned automatically from the cable linked into this joint.'
+                  : 'Set manually, or connect a link to this joint.'}
+              </p>
             </div>
             <div className="space-y-1.5 sm:col-span-3">
               <Label htmlFor="tj-area" className="flex items-center gap-1.5">
@@ -1044,11 +1088,11 @@ export function TjFormDialog({
                 Input Fibre & Cores
               </Label>
               <span className="text-[10px] text-muted-foreground">
-                Power configured per core (dBm)
+                Power read from the linked upstream device
               </span>
             </div>
             <p className="text-[10px] text-muted-foreground leading-relaxed">
-              Define incoming fiber tubes. Optical input power (dBm) is configured on each core individually below. Click the status button to toggle between{' '}
+              Define incoming fiber tubes. Input power is filled automatically from the upstream device's output core when this joint is linked — no manual dBm entry. Click the status button to toggle between{' '}
               <strong className="text-emerald-600 dark:text-emerald-400">Free (Spare)</strong>,{' '}
               <strong className="text-sky-600 dark:text-sky-400">In Use</strong>, or{' '}
               <strong className="text-rose-600 dark:text-rose-400">Cut</strong>.
@@ -1059,7 +1103,6 @@ export function TjFormDialog({
               onChange={handleCoresChange}
               addLabel="Add input core"
               emptyLabel="Add at least one input core"
-              showPowerInput
               splitterCoreLabel={form.splitterEnabled ? form.inputCoreLabel : undefined}
             />
           </section>
@@ -1222,6 +1265,14 @@ export function TjFormDialog({
                     ) : null}
                   </div>
 
+                  {upstreamPower ? (
+                    <p className="mt-1 text-[10px] text-muted-foreground">
+                      Feed read from {upstreamPower.sourceKind.toUpperCase()} {upstreamPower.sourceCode}
+                      {upstreamPower.sourceCore ? ` · ${upstreamPower.sourceCore}` : ''} via{' '}
+                      {upstreamPower.fibreId}
+                    </p>
+                  ) : null}
+
                   <div className="mt-2.5 grid grid-cols-3 gap-2 text-center">
                     <div className="rounded-lg border border-white/60 bg-white/70 p-1.5 dark:border-white/10 dark:bg-white/[0.05]">
                       <p className="text-[9px] uppercase tracking-wider text-muted-foreground">
@@ -1251,7 +1302,7 @@ export function TjFormDialog({
 
                   {inputPowerNum === null ? (
                     <p className="mt-2 text-[10px] text-amber-600 dark:text-amber-400 font-medium">
-                      💡 Tip: Set optical power (dBm) on core &quot;{form.inputCoreLabel}&quot; above to auto-calculate the output power budget.
+                      💡 Link the feed core &quot;{form.inputCoreLabel}&quot; to an upstream OLT or splitter leg to read the input power automatically.
                     </p>
                   ) : powerAssessment ? (
                     <p className="mt-2 text-[10px] text-muted-foreground leading-relaxed">

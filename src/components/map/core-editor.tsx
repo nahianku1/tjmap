@@ -24,7 +24,6 @@ export function CoreEditor({
   onChange,
   addLabel = 'Add core',
   emptyLabel = 'No cores added yet',
-  showPowerInput = false,
   splitterCoreLabel,
   className,
 }: {
@@ -32,7 +31,6 @@ export function CoreEditor({
   onChange: (cores: Core[]) => void;
   addLabel?: string;
   emptyLabel?: string;
-  showPowerInput?: boolean;
   splitterCoreLabel?: string;
   className?: string;
 }) {
@@ -170,37 +168,6 @@ export function CoreEditor({
               />
               {isFree ? 'Free' : isDamaged ? 'Cut' : 'In Use'}
             </button>
-
-            {/* Per-core optical power input */}
-            {showPowerInput ? (
-              <div
-                className={cn(
-                  'flex shrink-0 items-center gap-1 rounded-lg border px-1.5 py-0.5 transition-colors',
-                  splitterCoreLabel && core.label === splitterCoreLabel
-                    ? 'border-violet-500/50 bg-violet-500/10'
-                    : 'border-white/60 bg-white/70 dark:border-white/10 dark:bg-white/[0.05]',
-                )}
-                title={
-                  splitterCoreLabel && core.label === splitterCoreLabel
-                    ? 'Splitter feed power. Output branch powers are automatically computed from this dBm.'
-                    : 'Input optical power (dBm) for this core'
-                }
-              >
-                <input
-                  type="number"
-                  step="0.1"
-                  placeholder="+3.0"
-                  aria-label={`Optical power (dBm) for ${core.label}`}
-                  value={core.powerDbm !== null && core.powerDbm !== undefined ? core.powerDbm : ''}
-                  onChange={(e) => {
-                    const val = e.target.value === '' ? null : Number(e.target.value);
-                    update(index, { powerDbm: val });
-                  }}
-                  className="w-12 bg-transparent font-mono text-[11px] font-semibold outline-none"
-                />
-                <span className="text-[9px] font-medium text-muted-foreground">dBm</span>
-              </div>
-            ) : null}
 
             <button
               type="button"

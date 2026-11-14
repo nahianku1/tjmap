@@ -14,6 +14,7 @@ import {
   polygonAreaM2,
   polygonPerimeterMeters,
   routeCoordinates,
+  routeLengthMeters,
   routeMidpoint,
 } from '@/lib/route';
 import {
@@ -62,6 +63,16 @@ interface NetworkMapProps {
   onClearPinnedLocation?: () => void;
   onAddTjAtPinnedLocation?: (point: { lat: number; lng: number; address: string }) => void;
   onAddOltAtPinnedLocation?: (point: { lat: number; lng: number; address: string }) => void;
+  /** Admins can drag devices to new coordinates; the move is committed on drop. */
+  canMoveDevices?: boolean;
+  onMoveDevice?: (move: {
+    kind: 'tj' | 'olt' | 'onu';
+    id: string;
+    lat: number;
+    lng: number;
+  }) => void;
+  /** Saves a dragged cable route (its waypoint coordinates). */
+  onMoveLinkPath?: (id: string, path: LinkPathPoint[]) => void;
 }
 
 const OSM_TILE_URLS = [
@@ -74,6 +85,17 @@ const EMPTY: { type: 'FeatureCollection'; features: unknown[] } = {
   type: 'FeatureCollection',
   features: [],
 };
+
+function samePath(a: LinkPathPoint[], b: LinkPathPoint[]): boolean {
+  return (
+    a.length === b.length &&
+    a.every(
+      (point, index) =>
+        Math.abs(point.lat - b[index].lat) < 1e-7 &&
+        Math.abs(point.lng - b[index].lng) < 1e-7,
+    )
+  );
+}
 
 const DASH_FRAMES: number[][] = [
   [0.5, 4],
@@ -144,7 +166,12 @@ function linksToGeoJson(links: FibreLink[]) {
     type: 'FeatureCollection' as const,
     features: links.map((link) => ({
       type: 'Feature' as const,
-      properties: { id: link.id, fibreId: link.fibreId, status: link.status },
+      properties: {
+        id: link.id,
+        fibreId: link.fibreId,
+        status: link.status,
+        color: link.color ?? null,
+      },
       geometry: {
         type: 'LineString' as const,
         coordinates: routeCoordinates(link.fromLat, link.fromLng, link.toLat, link.toLng, link.path),
@@ -268,7 +295,7 @@ function addNetworkLayers(map: maplibregl.Map, dark: boolean) {
           'case',
           ['==', ['get', 'status'], 'cut'],
           dark ? '#fb7185' : '#e11d48',
-          '#000000',
+          ['case', ['!=', ['get', 'color'], null], ['get', 'color'], '#000000'],
         ] as never,
         'line-width': ['interpolate', ['linear'], ['zoom'], 4, 5, 10, 8, 15, 11] as never,
         'line-blur': 7,
@@ -279,7 +306,12 @@ function addNetworkLayers(map: maplibregl.Map, dark: boolean) {
     map.setPaintProperty(
       'links-glow',
       'line-color',
-      ['case', ['==', ['get', 'status'], 'cut'], dark ? '#fb7185' : '#e11d48', '#000000'] as never,
+      [
+        'case',
+        ['==', ['get', 'status'], 'cut'],
+        dark ? '#fb7185' : '#e11d48',
+        ['case', ['!=', ['get', 'color'], null], ['get', 'color'], '#000000'],
+      ] as never,
     );
     map.setPaintProperty('links-glow', 'line-opacity', dark ? 0.35 : 0.18);
   }
@@ -292,13 +324,17 @@ function addNetworkLayers(map: maplibregl.Map, dark: boolean) {
       filter: ['==', ['get', 'status'], 'active'],
       layout: { 'line-cap': 'round', 'line-join': 'round' },
       paint: {
-        'line-color': '#000000',
+        'line-color': ['case', ['!=', ['get', 'color'], null], ['get', 'color'], '#000000'] as never,
         'line-width': ['interpolate', ['linear'], ['zoom'], 4, 1.2, 10, 2, 15, 3] as never,
         'line-opacity': 0.95,
       },
     });
   } else {
-    map.setPaintProperty('links-base', 'line-color', '#000000');
+    map.setPaintProperty(
+      'links-base',
+      'line-color',
+      ['case', ['!=', ['get', 'color'], null], ['get', 'color'], '#000000'] as never,
+    );
     map.setPaintProperty('links-base', 'line-opacity', 0.95);
   }
 
@@ -326,14 +362,18 @@ function addNetworkLayers(map: maplibregl.Map, dark: boolean) {
       filter: ['==', ['get', 'status'], 'active'],
       layout: { 'line-cap': 'round', 'line-join': 'round' },
       paint: {
-        'line-color': '#67e8f9',
+        'line-color': ['case', ['!=', ['get', 'color'], null], ['get', 'color'], '#67e8f9'] as never,
         'line-width': ['interpolate', ['linear'], ['zoom'], 6, 0.7, 12, 1.5] as never,
         'line-opacity': 0.85,
         'line-dasharray': [1, 5],
       },
     });
   } else {
-    map.setPaintProperty('links-flow', 'line-color', '#67e8f9');
+    map.setPaintProperty(
+      'links-flow',
+      'line-color',
+      ['case', ['!=', ['get', 'color'], null], ['get', 'color'], '#67e8f9'] as never,
+    );
     map.setPaintProperty('links-flow', 'line-opacity', 0.85);
   }
 
@@ -508,13 +548,17 @@ export function NetworkMap({
   onClearPinnedLocation,
   onAddTjAtPinnedLocation,
   onAddOltAtPinnedLocation,
+  canMoveDevices = false,
+  onMoveDevice,
+  onMoveLinkPath,
 }: NetworkMapProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
   const markerRef = useRef<Map<string, maplibregl.Marker>>(new Map());
   const oltMarkerRef = useRef<Map<string, maplibregl.Marker>>(new Map());
   const onuMarkerRef = useRef<Map<string, maplibregl.Marker>>(new Map());
-  const labelRef = useRef<maplibregl.Marker[]>([]);
+  const labelRef = useRef<Map<string, maplibregl.Marker>>(new Map());
+  const bendMarkerRef = useRef<maplibregl.Marker[]>([]);
   const routeMarkerRef = useRef<maplibregl.Marker[]>([]);
   const drawCursorRef = useRef<{ lng: number; lat: number } | null>(null);
   const pinnedMarkerRef = useRef<maplibregl.Marker | null>(null);
@@ -530,6 +574,103 @@ export function NetworkMap({
   const selectedLinkRef = useRef(selectedLinkId);
   const drawPathRef = useRef(drawPath);
   drawPathRef.current = drawPath;
+  const moveCallbacks = useRef({ onMoveDevice, onMoveLinkPath });
+  moveCallbacks.current = { onMoveDevice, onMoveLinkPath };
+  const canMoveRef = useRef(canMoveDevices);
+  canMoveRef.current = canMoveDevices;
+  const [dragging, setDragging] = useState<{
+    kind: 'tj' | 'olt' | 'onu';
+    id: string;
+    lat: number;
+    lng: number;
+  } | null>(null);
+  const [linkPathPreview, setLinkPathPreview] = useState<{
+    id: string;
+    path: LinkPathPoint[];
+  } | null>(null);
+  const linkDragRef = useRef<{
+    id: string;
+    start: { lng: number; lat: number };
+    originalPath: LinkPathPoint[];
+    currentPath: LinkPathPoint[];
+    moved: boolean;
+  } | null>(null);
+
+  // A live overlay while a device is dragged: attached link lines and their
+  // distances follow the cursor before the move is persisted on drop. The dragged
+  // marker itself is moved natively by MapLibre.
+  const viewLinks = useMemo(() => {
+    if (!dragging && !linkPathPreview) return links;
+    return links.map((link) => {
+      const fromMoved = Boolean(
+        dragging &&
+          ((dragging.kind === 'tj' && link.fromTjId === dragging.id) ||
+            (dragging.kind === 'olt' && link.fromOltId === dragging.id) ||
+            (dragging.kind === 'onu' && link.fromOnuId === dragging.id)),
+      );
+      const toMoved = Boolean(
+        dragging &&
+          ((dragging.kind === 'tj' && link.toTjId === dragging.id) ||
+            (dragging.kind === 'olt' && link.toOltId === dragging.id) ||
+            (dragging.kind === 'onu' && link.toOnuId === dragging.id)),
+      );
+      const pathChanged = linkPathPreview?.id === link.id;
+      if (!fromMoved && !toMoved && !pathChanged) return link;
+
+      const fromLat = fromMoved && dragging ? dragging.lat : link.fromLat;
+      const fromLng = fromMoved && dragging ? dragging.lng : link.fromLng;
+      const toLat = toMoved && dragging ? dragging.lat : link.toLat;
+      const toLng = toMoved && dragging ? dragging.lng : link.toLng;
+      const path = pathChanged && linkPathPreview ? linkPathPreview.path : link.path;
+      return {
+        ...link,
+        fromLat,
+        fromLng,
+        toLat,
+        toLng,
+        path,
+        lengthM: routeLengthMeters(fromLat, fromLng, toLat, toLng, path),
+      };
+    });
+  }, [links, dragging, linkPathPreview]);
+
+  // Release the overlay once the saved device arrives at the dragged position.
+  useEffect(() => {
+    if (!dragging) return;
+    const device =
+      dragging.kind === 'tj'
+        ? tjs.find((item) => item.id === dragging.id)
+        : dragging.kind === 'olt'
+          ? olts.find((item) => item.id === dragging.id)
+          : onus.find((item) => item.id === dragging.id);
+    if (!device || device.lat === null || device.lng === null) return;
+    if (
+      Math.abs(device.lat - dragging.lat) < 1e-7 &&
+      Math.abs(device.lng - dragging.lng) < 1e-7
+    ) {
+      setDragging(null);
+    }
+  }, [tjs, olts, onus, dragging]);
+
+  // Release the route overlay once the saved link carries the dragged path.
+  useEffect(() => {
+    if (!linkPathPreview) return;
+    const link = links.find((item) => item.id === linkPathPreview.id);
+    if (!link) {
+      setLinkPathPreview(null);
+      return;
+    }
+    if (samePath(link.path ?? [], linkPathPreview.path)) setLinkPathPreview(null);
+  }, [links, linkPathPreview]);
+
+  // Never leave a route overlay behind if its save silently never lands.
+  useEffect(() => {
+    if (!linkPathPreview) return;
+    const timer = window.setTimeout(() => {
+      setLinkPathPreview((current) => (current === linkPathPreview ? null : current));
+    }, 8000);
+    return () => window.clearTimeout(timer);
+  }, [linkPathPreview]);
 
   const [measureMode, setMeasureMode] = useState<MeasureMode>('none');
   const [measureKind, setMeasureKind] = useState<MeasureKind | null>(null);
@@ -541,6 +682,7 @@ export function NetworkMap({
   const measureLabelRef = useRef<maplibregl.Marker[]>([]);
   measureModeRef.current = measureMode;
   measurePointsRef.current = measurePoints;
+  const canDragDevice = canMoveDevices && mode === 'idle' && measureMode === 'none';
 
   const appendMeasurePoint = useCallback((point: { lat: number; lng: number }) => {
     setMeasurePoints((current) => {
@@ -584,7 +726,7 @@ export function NetworkMap({
   const drawCallbacks = useRef({ onDrawPoint, onMoveDrawPoint, onFinishDraw });
   drawCallbacks.current = { onDrawPoint, onMoveDrawPoint, onFinishDraw };
   modeRef.current = mode;
-  linksRef.current = links;
+  linksRef.current = viewLinks;
   selectedLinkRef.current = selectedLinkId;
   callbacks.current = { onSelectTj, onSelectLink, onSelectOlt, onSelectOnu, onMapClick, onBackgroundClick };
 
@@ -739,7 +881,83 @@ export function NetworkMap({
       if (modeRef.current === 'draw-link') drawCallbacks.current.onFinishDraw?.();
     });
 
+    // Grab a cable route and slide its drawn waypoints with the pointer. The
+    // device endpoints stay fixed, so the span and its length change live.
+    map.on('mousedown', (event) => {
+      if (modeRef.current !== 'idle' || measureModeRef.current !== 'none') return;
+      if (!canMoveRef.current) return;
+      if (!map.getLayer('links-hit')) return;
+      const hits = map.queryRenderedFeatures(event.point, { layers: ['links-hit'] });
+      const id = hits[0]?.properties?.id;
+      if (!id) return;
+      const link = linksRef.current.find((item) => item.id === String(id));
+      if (!link) return;
+      const originalPath = (link.path ?? []).map((point) => ({
+        lat: point.lat,
+        lng: point.lng,
+      }));
+      linkDragRef.current = {
+        id: link.id,
+        start: { lng: event.lngLat.lng, lat: event.lngLat.lat },
+        originalPath,
+        currentPath: originalPath,
+        moved: false,
+      };
+      map.dragPan.disable();
+      map.getCanvas().style.cursor = 'grabbing';
+    });
+
+    const finishLinkDrag = () => {
+      const drag = linkDragRef.current;
+      if (!drag) return;
+      linkDragRef.current = null;
+      map.dragPan.enable();
+      map.getCanvas().style.cursor = '';
+      if (!drag.moved) {
+        setLinkPathPreview(null);
+        return;
+      }
+      setLinkPathPreview({ id: drag.id, path: drag.currentPath });
+      moveCallbacks.current.onMoveLinkPath?.(drag.id, drag.currentPath);
+      const settledPath = drag.currentPath;
+      window.setTimeout(() => {
+        setLinkPathPreview((current) =>
+          current && current.id === drag.id && samePath(current.path, settledPath)
+            ? null
+            : current,
+        );
+      }, 8000);
+    };
+    window.addEventListener('mouseup', finishLinkDrag);
+
     map.on('mousemove', (event) => {
+      const activeLinkDrag = linkDragRef.current;
+      if (activeLinkDrag) {
+        const link = linksRef.current.find((item) => item.id === activeLinkDrag.id);
+        if (link) {
+          const dLng = event.lngLat.lng - activeLinkDrag.start.lng;
+          const dLat = event.lngLat.lat - activeLinkDrag.start.lat;
+          const basePath = activeLinkDrag.originalPath.length
+            ? activeLinkDrag.originalPath
+            : [
+                {
+                  lat: (link.fromLat + link.toLat) / 2,
+                  lng: (link.fromLng + link.toLng) / 2,
+                },
+              ];
+          const movedPath = basePath.map((point) => ({
+            lat: point.lat + dLat,
+            lng: point.lng + dLng,
+          }));
+          activeLinkDrag.currentPath = movedPath;
+          if (Math.abs(dLat) > 1e-9 || Math.abs(dLng) > 1e-9) activeLinkDrag.moved = true;
+          if (activeLinkDrag.moved) {
+            setLinkPathPreview({ id: activeLinkDrag.id, path: movedPath });
+          }
+        }
+        map.getCanvas().style.cursor = 'grabbing';
+        return;
+      }
       if (measureModeRef.current !== 'none') {
         map.getCanvas().style.cursor = 'crosshair';
         measureCursorRef.current = { lng: event.lngLat.lng, lat: event.lngLat.lat };
@@ -779,6 +997,7 @@ export function NetworkMap({
     return () => {
       disposed = true;
       if (saveThrottle) clearTimeout(saveThrottle);
+      window.removeEventListener('mouseup', finishLinkDrag);
       map.off('moveend', onViewChange);
       map.off('zoomend', onViewChange);
       cancelAnimationFrame(rafId);
@@ -791,7 +1010,9 @@ export function NetworkMap({
       onuMarkerRef.current.forEach((marker) => marker.remove());
       onuMarkerRef.current.clear();
       labelRef.current.forEach((marker) => marker.remove());
-      labelRef.current = [];
+      labelRef.current.clear();
+      bendMarkerRef.current.forEach((marker) => marker.remove());
+      bendMarkerRef.current = [];
       routeMarkerRef.current.forEach((marker) => marker.remove());
       routeMarkerRef.current = [];
       measureVertexRef.current.forEach((marker) => marker.remove());
@@ -880,12 +1101,12 @@ export function NetworkMap({
     map.setStyle(getOsmStyle(nextTheme === 'dark'));
   }, [resolvedTheme, ready]);
 
-  // Keep fibre data in sync with server state.
+  // Keep fibre data in sync with server state and live drag positions.
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !ready) return;
-    syncLinkData(map, links, selectedLinkId);
-  }, [links, selectedLinkId, ready, styleVersion]);
+    syncLinkData(map, viewLinks, selectedLinkId);
+  }, [viewLinks, selectedLinkId, ready, styleVersion]);
 
   // Draft route being drawn in the link dialog.
   useEffect(() => {
@@ -1066,6 +1287,7 @@ export function NetworkMap({
     tjs.forEach((tj) => {
       let marker = markerRef.current.get(tj.id);
       if (!marker) {
+        let dragged = false;
         const element = document.createElement('button');
         element.type = 'button';
         element.className = 'tj-marker';
@@ -1073,24 +1295,70 @@ export function NetworkMap({
         element.innerHTML = buildMarkerContent(tj);
         element.addEventListener('click', (event) => {
           event.stopPropagation();
+          if (dragged) return;
+          const position = marker?.getLngLat();
+          const point = position
+            ? { lat: position.lat, lng: position.lng }
+            : { lat: tj.lat, lng: tj.lng };
           if (measureModeRef.current !== 'none') {
-            appendMeasureRef.current({ lat: tj.lat, lng: tj.lng });
+            appendMeasureRef.current(point);
             return;
           }
           if (modeRef.current === 'draw-link') {
-            drawCallbacks.current.onDrawPoint?.({ lat: tj.lat, lng: tj.lng });
+            drawCallbacks.current.onDrawPoint?.(point);
             return;
           }
           callbacks.current.onSelectTj(tj.id);
         });
 
-        marker = new maplibregl.Marker({ element, anchor: 'center' })
+        const created = new maplibregl.Marker({
+          element,
+          anchor: 'center',
+          draggable: canDragDevice,
+        })
           .setLngLat([tj.lng, tj.lat])
           .addTo(map);
+        created.on('dragstart', () => {
+          dragged = true;
+        });
+        created.on('drag', () => {
+          const position = created.getLngLat();
+          setDragging({ kind: 'tj', id: tj.id, lat: position.lat, lng: position.lng });
+        });
+        created.on('dragend', () => {
+          const position = created.getLngLat();
+          setDragging({ kind: 'tj', id: tj.id, lat: position.lat, lng: position.lng });
+          moveCallbacks.current.onMoveDevice?.({
+            kind: 'tj',
+            id: tj.id,
+            lat: position.lat,
+            lng: position.lng,
+          });
+          window.setTimeout(() => {
+            dragged = false;
+          }, 250);
+          // If the save fails the overlay must not keep the link lines at a
+          // position the device never reached.
+          window.setTimeout(() => {
+            setDragging((current) =>
+              current &&
+              current.kind === 'tj' &&
+              current.id === tj.id &&
+              Math.abs(current.lat - position.lat) < 1e-9 &&
+              Math.abs(current.lng - position.lng) < 1e-9
+                ? null
+                : current,
+            );
+          }, 8000);
+        });
+        marker = created;
         markerRef.current.set(tj.id, marker);
       } else {
         marker.setLngLat([tj.lng, tj.lat]);
       }
+      (marker as unknown as { setDraggable?: (value: boolean) => void }).setDraggable?.(
+        canDragDevice,
+      );
 
       const element = marker.getElement();
       const isCut = tj.isCut || tj.tjType === 'cut';
@@ -1101,14 +1369,14 @@ export function NetworkMap({
       element.classList.toggle('is-selected', tj.id === selectedTjId);
       element.style.zIndex = tj.id === selectedTjId ? '6' : '';
     });
-  }, [tjs, selectedTjId, ready, styleVersion]);
+  }, [tjs, selectedTjId, ready, styleVersion, canDragDevice]);
 
   // Sync OLT cabinet markers.
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
 
-    const live = new Set(olts.map((olt) => olt.id));
+        const live = new Set(olts.map((olt) => olt.id));
     oltMarkerRef.current.forEach((marker, id) => {
       if (!live.has(id)) {
         marker.remove();
@@ -1120,6 +1388,7 @@ export function NetworkMap({
       if (olt.lat === null || olt.lng === null) return;
       let marker = oltMarkerRef.current.get(olt.id);
       if (!marker) {
+        let dragged = false;
         const element = document.createElement('button');
         element.type = 'button';
         element.className = 'olt-marker';
@@ -1127,36 +1396,81 @@ export function NetworkMap({
         element.innerHTML = buildOltMarkerContent(olt);
         element.addEventListener('click', (event) => {
           event.stopPropagation();
+          if (dragged) return;
+          const position = marker?.getLngLat();
+          const point = position
+            ? { lat: position.lat, lng: position.lng }
+            : { lat: olt.lat!, lng: olt.lng! };
           if (measureModeRef.current !== 'none') {
-            appendMeasureRef.current({ lat: olt.lat!, lng: olt.lng! });
+            appendMeasureRef.current(point);
             return;
           }
           if (modeRef.current === 'draw-link') {
-            drawCallbacks.current.onDrawPoint?.({ lat: olt.lat!, lng: olt.lng! });
+            drawCallbacks.current.onDrawPoint?.(point);
             return;
           }
           callbacks.current.onSelectOlt(olt.id);
         });
-        marker = new maplibregl.Marker({ element, anchor: 'center' })
+
+        const created = new maplibregl.Marker({
+          element,
+          anchor: 'center',
+          draggable: canDragDevice,
+        })
           .setLngLat([olt.lng, olt.lat])
           .addTo(map);
+        created.on('dragstart', () => {
+          dragged = true;
+        });
+        created.on('drag', () => {
+          const position = created.getLngLat();
+          setDragging({ kind: 'olt', id: olt.id, lat: position.lat, lng: position.lng });
+        });
+        created.on('dragend', () => {
+          const position = created.getLngLat();
+          setDragging({ kind: 'olt', id: olt.id, lat: position.lat, lng: position.lng });
+          moveCallbacks.current.onMoveDevice?.({
+            kind: 'olt',
+            id: olt.id,
+            lat: position.lat,
+            lng: position.lng,
+          });
+          window.setTimeout(() => {
+            dragged = false;
+          }, 250);
+          window.setTimeout(() => {
+            setDragging((current) =>
+              current &&
+              current.kind === 'olt' &&
+              current.id === olt.id &&
+              Math.abs(current.lat - position.lat) < 1e-9 &&
+              Math.abs(current.lng - position.lng) < 1e-9
+                ? null
+                : current,
+            );
+          }, 8000);
+        });
+        marker = created;
         oltMarkerRef.current.set(olt.id, marker);
       } else {
         marker.setLngLat([olt.lng, olt.lat]);
       }
+      (marker as unknown as { setDraggable?: (value: boolean) => void }).setDraggable?.(
+        canDragDevice,
+      );
 
       const element = marker.getElement();
       element.innerHTML = buildOltMarkerContent(olt);
       element.setAttribute('aria-label', `${olt.code} — ${olt.name}`);
     });
-  }, [olts, ready, styleVersion]);
+  }, [olts, ready, styleVersion, canDragDevice]);
 
   // Sync ONU markers.
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
 
-    const live = new Set(onus.map((onu) => onu.id));
+        const live = new Set(onus.map((onu) => onu.id));
     onuMarkerRef.current.forEach((marker, id) => {
       if (!live.has(id)) {
         marker.remove();
@@ -1168,6 +1482,7 @@ export function NetworkMap({
       if (onu.lat === null || onu.lng === null) return;
       let marker = onuMarkerRef.current.get(onu.id);
       if (!marker) {
+        let dragged = false;
         const element = document.createElement('button');
         element.type = 'button';
         element.className = 'onu-marker';
@@ -1175,70 +1490,243 @@ export function NetworkMap({
         element.innerHTML = buildOnuMarkerContent(onu);
         element.addEventListener('click', (event) => {
           event.stopPropagation();
+          if (dragged) return;
+          const position = marker?.getLngLat();
+          const point = position
+            ? { lat: position.lat, lng: position.lng }
+            : { lat: onu.lat!, lng: onu.lng! };
           if (measureModeRef.current !== 'none') {
-            appendMeasureRef.current({ lat: onu.lat!, lng: onu.lng! });
+            appendMeasureRef.current(point);
             return;
           }
           if (modeRef.current === 'draw-link') {
-            drawCallbacks.current.onDrawPoint?.({ lat: onu.lat!, lng: onu.lng! });
+            drawCallbacks.current.onDrawPoint?.(point);
             return;
           }
           callbacks.current.onSelectOnu?.(onu.id);
         });
-        marker = new maplibregl.Marker({ element, anchor: 'center' })
+
+        const created = new maplibregl.Marker({
+          element,
+          anchor: 'center',
+          draggable: canDragDevice,
+        })
           .setLngLat([onu.lng, onu.lat])
           .addTo(map);
+        created.on('dragstart', () => {
+          dragged = true;
+        });
+        created.on('drag', () => {
+          const position = created.getLngLat();
+          setDragging({ kind: 'onu', id: onu.id, lat: position.lat, lng: position.lng });
+        });
+        created.on('dragend', () => {
+          const position = created.getLngLat();
+          setDragging({ kind: 'onu', id: onu.id, lat: position.lat, lng: position.lng });
+          moveCallbacks.current.onMoveDevice?.({
+            kind: 'onu',
+            id: onu.id,
+            lat: position.lat,
+            lng: position.lng,
+          });
+          window.setTimeout(() => {
+            dragged = false;
+          }, 250);
+          window.setTimeout(() => {
+            setDragging((current) =>
+              current &&
+              current.kind === 'onu' &&
+              current.id === onu.id &&
+              Math.abs(current.lat - position.lat) < 1e-9 &&
+              Math.abs(current.lng - position.lng) < 1e-9
+                ? null
+                : current,
+            );
+          }, 8000);
+        });
+        marker = created;
         onuMarkerRef.current.set(onu.id, marker);
       } else {
         marker.setLngLat([onu.lng, onu.lat]);
       }
+      (marker as unknown as { setDraggable?: (value: boolean) => void }).setDraggable?.(
+        canDragDevice,
+      );
 
       const element = marker.getElement();
       element.innerHTML = buildOnuMarkerContent(onu);
       element.setAttribute('aria-label', `ONU ${onu.username} — ${onu.fibreId}`);
     });
-  }, [onus, ready, styleVersion]);
+  }, [onus, ready, styleVersion, canDragDevice]);
 
-  // Mid-span fibre labels.
+  // Mid-span fibre labels. Markers are reused so dragging only moves them and
+  // updates the live distance instead of rebuilding the overlay every frame.
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !ready) return;
 
-    labelRef.current.forEach((marker) => marker.remove());
-    labelRef.current = [];
-
-    const applyZoomVisibility = () => {
-      const visible = map.getZoom() >= 8.6;
-      labelRef.current.forEach((marker) => {
-        marker.getElement().style.display = visible ? '' : 'none';
-      });
-    };
-
-    links.forEach((link) => {
-      const element = document.createElement('button');
-      element.type = 'button';
-      element.className = 'link-label';
-      element.textContent = link.fibreId;
-      element.dataset.status = link.status;
-      element.setAttribute('aria-label', `Fibre link ${link.fibreId}`);
-      element.addEventListener('click', (event) => {
-        event.stopPropagation();
-        callbacks.current.onSelectLink(link.id);
-      });
-
-      const marker = new maplibregl.Marker({ element, anchor: 'center' })
-        .setLngLat(routeMidpoint(link.fromLat, link.fromLng, link.toLat, link.toLng, link.path))
-        .addTo(map);
-      labelRef.current.push(marker);
+    const live = new Set(viewLinks.map((link) => link.id));
+    labelRef.current.forEach((marker, id) => {
+      if (!live.has(id)) {
+        marker.remove();
+        labelRef.current.delete(id);
+      }
     });
 
-    applyZoomVisibility();
+    const visible = map.getZoom() >= 8.6;
+    viewLinks.forEach((link) => {
+      const movedWithDrag = Boolean(
+        (dragging &&
+          ((dragging.kind === 'tj' &&
+            (link.fromTjId === dragging.id || link.toTjId === dragging.id)) ||
+            (dragging.kind === 'olt' &&
+              (link.fromOltId === dragging.id || link.toOltId === dragging.id)) ||
+            (dragging.kind === 'onu' &&
+              (link.fromOnuId === dragging.id || link.toOnuId === dragging.id)))) ||
+          linkPathPreview?.id === link.id,
+      );
+
+      let marker = labelRef.current.get(link.id);
+      if (!marker) {
+        const element = document.createElement('button');
+        element.type = 'button';
+        element.className = 'link-label';
+        element.setAttribute('aria-label', `Fibre link ${link.fibreId}`);
+        element.addEventListener('click', (event) => {
+          event.stopPropagation();
+          callbacks.current.onSelectLink(link.id);
+        });
+        marker = new maplibregl.Marker({ element, anchor: 'center' })
+          .setLngLat(
+            routeMidpoint(link.fromLat, link.fromLng, link.toLat, link.toLng, link.path),
+          )
+          .addTo(map);
+        labelRef.current.set(link.id, marker);
+      }
+
+      marker.setLngLat(
+        routeMidpoint(link.fromLat, link.fromLng, link.toLat, link.toLng, link.path),
+      );
+      const element = marker.getElement();
+      element.dataset.status = link.status;
+      element.textContent = movedWithDrag
+        ? `${link.fibreId} · ${formatDistance(link.lengthM)}`
+        : link.fibreId;
+      element.style.display = visible ? '' : 'none';
+    });
+
+    const applyZoomVisibility = () => {
+      const show = map.getZoom() >= 8.6;
+      labelRef.current.forEach((marker) => {
+        marker.getElement().style.display = show ? '' : 'none';
+      });
+    };
     map.on('zoom', applyZoomVisibility);
 
     return () => {
       map.off('zoom', applyZoomVisibility);
     };
-  }, [links, ready, styleVersion]);
+  }, [viewLinks, ready, styleVersion, dragging, linkPathPreview]);
+
+  // Google-Maps-style bend editing for the selected link: drag a solid handle to
+  // move an existing bend, or drag a midpoint handle to add a new bend.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !ready) return;
+
+    bendMarkerRef.current.forEach((marker) => marker.remove());
+    bendMarkerRef.current = [];
+    if (!selectedLinkId || !canDragDevice || dragging) return;
+    const link = links.find((item) => item.id === selectedLinkId);
+    if (!link) return;
+
+    const savedPath = link.path ?? [];
+    const route = [
+      { lat: link.fromLat, lng: link.fromLng },
+      ...savedPath,
+      { lat: link.toLat, lng: link.toLng },
+    ];
+
+    const makeHandle = (ghost: boolean) => {
+      const element = document.createElement('div');
+      element.style.cssText = [
+        `width:${ghost ? 10 : 13}px`,
+        `height:${ghost ? 10 : 13}px`,
+        'border-radius:9999px',
+        `background:${ghost ? 'rgba(34,211,238,0.55)' : '#ffffff'}`,
+        'border:2px solid #06b6d4',
+        'box-shadow:0 1px 4px rgba(2,6,23,0.45)',
+        'cursor:grab',
+        ghost ? 'opacity:0.85' : '',
+      ].join(';');
+      element.title = ghost ? 'Drag to add a bend' : 'Drag to move this bend';
+      return element;
+    };
+
+    savedPath.forEach((point, index) => {
+      const marker = new maplibregl.Marker({
+        element: makeHandle(false),
+        anchor: 'center',
+        draggable: true,
+      })
+        .setLngLat([point.lng, point.lat])
+        .addTo(map);
+
+      const pathWithPoint = (lat: number, lng: number) =>
+        savedPath.map((item, itemIndex) =>
+          itemIndex === index ? { lat, lng } : { lat: item.lat, lng: item.lng },
+        );
+
+      marker.on('drag', () => {
+        const position = marker.getLngLat();
+        setLinkPathPreview({
+          id: link.id,
+          path: pathWithPoint(position.lat, position.lng),
+        });
+      });
+      marker.on('dragend', () => {
+        const position = marker.getLngLat();
+        const path = pathWithPoint(position.lat, position.lng);
+        setLinkPathPreview({ id: link.id, path });
+        moveCallbacks.current.onMoveLinkPath?.(link.id, path);
+      });
+      bendMarkerRef.current.push(marker);
+    });
+
+    // A drag from a midpoint inserts one new bend for that segment.
+    for (let segment = 0; segment < route.length - 1; segment += 1) {
+      const start = route[segment];
+      const end = route[segment + 1];
+      const marker = new maplibregl.Marker({
+        element: makeHandle(true),
+        anchor: 'center',
+        draggable: true,
+      })
+        .setLngLat([(start.lng + end.lng) / 2, (start.lat + end.lat) / 2])
+        .addTo(map);
+
+      const pathWithInsertedBend = (lat: number, lng: number) => {
+        const next = savedPath.map((item) => ({ lat: item.lat, lng: item.lng }));
+        next.splice(segment, 0, { lat, lng });
+        return next;
+      };
+
+      marker.on('drag', () => {
+        const position = marker.getLngLat();
+        setLinkPathPreview({
+          id: link.id,
+          path: pathWithInsertedBend(position.lat, position.lng),
+        });
+      });
+      marker.on('dragend', () => {
+        const position = marker.getLngLat();
+        const path = pathWithInsertedBend(position.lat, position.lng);
+        setLinkPathPreview({ id: link.id, path });
+        moveCallbacks.current.onMoveLinkPath?.(link.id, path);
+      });
+      bendMarkerRef.current.push(marker);
+    }
+  }, [selectedLinkId, links, ready, styleVersion, canDragDevice, dragging]);
 
   // Travelling light along active spans.
   useEffect(() => {

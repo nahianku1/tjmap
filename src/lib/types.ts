@@ -243,6 +243,10 @@ export interface LinkPathPoint {
   lng: number;
 }
 
+export type PonType = 'epon' | 'gpon';
+
+export type OnuClass = 'A' | 'B' | 'B+' | 'C' | 'C+' | 'C++' | 'PX10' | 'PX20' | 'PX30';
+
 export interface LinkCore {
   index: number;
   label: string;
@@ -280,6 +284,14 @@ export interface FibreLink {
   path: LinkPathPoint[];
   status: LinkStatus;
   lengthM: number | null;
+  /** Fibre attenuation at the working wavelength, in dB per kilometre. */
+  attenuationDbPerKm: number;
+  /** Fusion splices inside this span (each costs a fixed splice loss). */
+  spliceCount: number;
+  /** Total connector / patch-panel loss at both ends of the span. */
+  connectionLossDb: number;
+  /** Optional map colour; null uses the default link styling. */
+  color: string | null;
   notes: string | null;
   createdAt: string;
   updatedAt: string;
@@ -299,6 +311,8 @@ export interface Onu {
   macAddress?: string | null;
   vlanId?: number | null;
   fibreId: string;
+  ponType: PonType;
+  onuClass: OnuClass;
   cores: OnuCore[];
   notes?: string | null;
   lat: number | null;
@@ -316,6 +330,8 @@ export interface OnuInput {
   macAddress?: string;
   vlanId?: number | null;
   fibreId: string;
+  ponType?: PonType;
+  onuClass?: OnuClass;
   cores: OnuCore[];
   areaId?: string | null;
   lat?: number;
@@ -373,6 +389,10 @@ export interface LinkInput {
   coreCount: number;
   status: LinkStatus;
   notes?: string;
+  attenuationDbPerKm?: number;
+  spliceCount?: number;
+  connectionLossDb?: number;
+  color?: string | null;
   cores?: Omit<LinkCore, 'status'>[];
   path?: LinkPathPoint[];
 }

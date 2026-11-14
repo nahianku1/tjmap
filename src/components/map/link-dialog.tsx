@@ -129,8 +129,12 @@ export function LinkDialog({
   const [toKey, setToKey] = useState('');
   const [fibreId, setFibreId] = useState('');
   const [coreCount, setCoreCount] = useState('4');
+  const [attenuation, setAttenuation] = useState('0.35');
+  const [spliceCount, setSpliceCount] = useState('2');
+  const [connectionLoss, setConnectionLoss] = useState('1');
   const [rows, setRows] = useState<CoreRow[]>([]);
   const [status, setStatus] = useState<LinkStatus>('active');
+  const [color, setColor] = useState<string | null>(null);
   const [notes, setNotes] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -155,6 +159,10 @@ export function LinkDialog({
       );
       setFibreId(link.fibreId);
       setCoreCount(String(link.coreCount || link.cores.length || 0));
+      setAttenuation(String(link.attenuationDbPerKm ?? 0.35));
+      setSpliceCount(String(link.spliceCount ?? 2));
+      setConnectionLoss(String(link.connectionLossDb ?? 1));
+      setColor(link.color ?? null);
       setStatus(link.status);
       setNotes(link.notes ?? '');
       setRows(
@@ -174,6 +182,10 @@ export function LinkDialog({
     setToKey(keyOf(to));
     setFibreId('');
     setCoreCount('4');
+    setAttenuation('0.35');
+    setSpliceCount('2');
+    setConnectionLoss('1');
+    setColor(null);
     setRows(makeRows(4));
     setStatus('active');
     setNotes('');
@@ -220,12 +232,12 @@ export function LinkDialog({
   const freeToOptions = useMemo(() => toOptions.filter((o) => !o.used), [toOptions]);
 
   const fromInfo = useMemo(
-    () => deviceInfo(fromKey, tjs, olts, onus, links, toKey),
-    [fromKey, toKey, tjs, olts, onus, links],
+    () => deviceInfo(fromKey, tjs, olts, onus, links),
+    [fromKey, tjs, olts, onus, links],
   );
   const toInfo = useMemo(
-    () => deviceInfo(toKey, tjs, olts, onus, links, fromKey),
-    [toKey, fromKey, tjs, olts, onus, links],
+    () => deviceInfo(toKey, tjs, olts, onus, links),
+    [toKey, tjs, olts, onus, links],
   );
 
   const connectedCount = rows.filter((row) => row.fromCore && row.toCore).length;
@@ -283,6 +295,10 @@ export function LinkDialog({
     const payload = {
       fibreId: fibreId.trim(),
       coreCount: cores.length,
+      attenuationDbPerKm: Number.isFinite(Number(attenuation)) ? Number(attenuation) : 0.35,
+      spliceCount: Number.isFinite(Number(spliceCount)) ? Math.max(0, Math.round(Number(spliceCount))) : 2,
+      connectionLossDb: Number.isFinite(Number(connectionLoss)) ? Number(connectionLoss) : 1,
+      color: color ?? null,
       fromCoreLabel: cores.find((core) => core.fromCoreLabel)?.fromCoreLabel ?? null,
       toCoreLabel: cores.find((core) => core.toCoreLabel)?.toCoreLabel ?? null,
       cores,
@@ -523,6 +539,57 @@ export function LinkDialog({
             </div>
           </div>
 
+          <section className="rounded-xl border border-amber-500/25 bg-amber-500/[0.04] p-3">
+            <div className="mb-2">
+              <p className="text-[12px] font-semibold">Optical span parameters</p>
+              <p className="text-[10px] text-muted-foreground">
+                Used to compute the power budget from OLT to ONU: {formatDistance(distance)} of fibre at{' '}
+                {attenuation || '0'} dB/km, {spliceCount || '0'} splice(s) at 0.1 dB each and{' '}
+                {connectionLoss || '0'} dB of connector loss.
+              </p>
+            </div>
+            <div className="grid gap-3 sm:grid-cols-3">
+              <div className="space-y-1.5">
+                <Label htmlFor="link-attenuation">Attenuation (dB/km)</Label>
+                <Input
+                  id="link-attenuation"
+                  type="number"
+                  step="0.01"
+                  min={0}
+                  max={5}
+                  value={attenuation}
+                  onChange={(event) => setAttenuation(event.target.value)}
+                  className="font-mono text-[12px]"
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="link-splices">Splices</Label>
+                <Input
+                  id="link-splices"
+                  type="number"
+                  min={0}
+                  max={288}
+                  value={spliceCount}
+                  onChange={(event) => setSpliceCount(event.target.value)}
+                  className="font-mono text-[12px]"
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="link-connection-loss">Connection loss (dB)</Label>
+                <Input
+                  id="link-connection-loss"
+                  type="number"
+                  step="0.1"
+                  min={0}
+                  max={20}
+                  value={connectionLoss}
+                  onChange={(event) => setConnectionLoss(event.target.value)}
+                  className="font-mono text-[12px]"
+                />
+              </div>
+            </div>
+          </section>
+
           <section className="min-w-0 rounded-xl border border-white/60 bg-white/40 p-3 dark:border-white/10 dark:bg-white/[0.03]">
             <div className="mb-2 flex items-center justify-between gap-2">
               <div>
@@ -636,6 +703,41 @@ export function LinkDialog({
             </div>
           </section>
 
+          <div className="flex items-center justify-between gap-3 rounded-xl border border-white/60 bg-white/40 px-3 py-2.5 dark:border-white/10 dark:bg-white/[0.03]">
+            <div>
+              <p className="text-[12px] font-semibold">Link colour</p>
+              <p className="text-[10px] text-muted-foreground">
+                Draw this cable in any colour on the map; default keeps the live cyan styling.
+              </p>
+            </div>
+            <div className="flex shrink-0 items-center gap-2">
+              {color ? (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="h-8 px-2 text-[11px]"
+                  onClick={() => setColor(null)}
+                >
+                  Default
+                </Button>
+              ) : null}
+              <label
+                className="relative grid size-9 cursor-pointer place-items-center rounded-xl border border-white/70 shadow-inner transition hover:scale-105 dark:border-white/15"
+                style={{ backgroundColor: color ?? '#67e8f9' }}
+                title={color ? `Link colour ${color}` : 'Pick a custom link colour'}
+              >
+                <input
+                  type="color"
+                  value={color ?? '#67e8f9'}
+                  onChange={(event) => setColor(event.target.value)}
+                  aria-label="Link colour"
+                  className="absolute inset-0 size-full cursor-pointer opacity-0"
+                />
+              </label>
+            </div>
+          </div>
+
           <div className="flex items-center justify-between rounded-xl border border-white/60 bg-white/40 px-3 py-2.5 dark:border-white/10 dark:bg-white/[0.03]">
             <div>
               <p className="text-[12px] font-semibold">Link is cut</p>
@@ -719,7 +821,6 @@ function deviceInfo(
   olts: Olt[],
   onus: Onu[],
   links: FibreLink[],
-  otherKey = '',
 ): DeviceInfo | null {
   const parts = splitKey(key);
   if (!parts) return null;
@@ -777,12 +878,8 @@ function deviceInfo(
   }
   const olt = olts.find((item) => item.id === parts.id);
   if (!olt) return null;
-  const other = splitKey(otherKey);
-  // TJ ↔ OLT spans only use PON ports, so don't count the uplink ports here.
-  const ports =
-    other?.kind === 'tj'
-      ? (olt.ponPorts ?? [])
-      : [...(olt.ponPorts ?? []), ...(olt.ethernetPorts ?? [])];
+  // OLT spans only use PON ports.
+  const ports = olt.ponPorts ?? [];
   const used = ports.filter((p) => p.status === 'in_use').length;
   const area = [olt.districtName, olt.areaName].filter(Boolean).join(' · ') || null;
   return {
@@ -951,8 +1048,7 @@ function coreOptions(
   if (!olt) return [];
   const other = splitKey(otherKey);
 
-  // A TJ ↔ OLT span is a PON drop: the OLT side can only use a free PON port,
-  // never an Ethernet uplink port and never a PON port already serving a span.
+  // A TJ ↔ OLT span is a PON drop: the OLT side uses a free PON port only.
   if (other?.kind === 'tj') {
     return olt.ponPorts
       .filter((port) => port.status !== 'in_use')
@@ -963,16 +1059,9 @@ function coreOptions(
       }));
   }
 
-  return [
-    ...olt.ponPorts.map((port) => ({
-      label: port.label,
-      hint: port.outputDbm === null ? 'PON' : `PON · +${port.outputDbm} dBm`,
-      used: port.status === 'in_use',
-    })),
-    ...olt.ethernetPorts.map((port) => ({
-      label: port.label,
-      hint: `ETH · ${port.speed}`,
-      used: port.status === 'in_use',
-    })),
-  ];
+  return olt.ponPorts.map((port) => ({
+    label: port.label,
+    hint: port.outputDbm === null ? 'PON' : `PON · +${port.outputDbm} dBm`,
+    used: port.status === 'in_use',
+  }));
 }

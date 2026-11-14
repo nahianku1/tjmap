@@ -6,13 +6,17 @@ import {
   Cable,
   CheckCircle2,
   Copy,
+  Gauge,
   Layers,
   Link2,
   MapPin,
   Network,
   Pencil,
+  Split,
   Trash2,
+  TriangleAlert,
   User,
+  Zap,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import {
@@ -27,11 +31,14 @@ import {
 import { Separator } from '@/components/ui/separator';
 import { Button } from '@/components/ui/button';
 import { CorePatchLine, linkPatches, type CorePatch } from '@/components/map/core-patch-line';
-import type { CoreStatus, FibreLink, Onu } from '@/lib/types';
-import { formatDistance } from '@/lib/utils';
+import type { CoreStatus, FibreLink, Olt, Onu, Tj } from '@/lib/types';
+import { computeOnuPowerBudget, type BudgetStatus } from '@/lib/power-budget';
+import { cn, formatDistance } from '@/lib/utils';
 
 interface OnuDetailPanelProps {
   onu: Onu | null;
+  tjs: Tj[];
+  olts: Olt[];
   links: FibreLink[];
   isAdmin: boolean;
   onClose: () => void;
@@ -57,6 +64,8 @@ const STATUS_LABELS: Record<CoreStatus, string> = {
 
 export function OnuDetailPanel({
   onu,
+  tjs,
+  olts,
   links,
   isAdmin,
   onClose,
@@ -74,6 +83,10 @@ export function OnuDetailPanel({
   const patches = useMemo<Map<string, CorePatch>>(
     () => (onu ? linkPatches(links, { kind: 'onu', id: onu.id }) : new Map()),
     [links, onu],
+  );
+  const budget = useMemo(
+    () => (onu ? computeOnuPowerBudget(onu, tjs, olts, links) : null),
+    [onu, tjs, olts, links],
   );
   const [copied, setCopied] = useState(false);
 
@@ -103,6 +116,9 @@ export function OnuDetailPanel({
                 <span className="rounded-md bg-teal-500/15 px-2 py-0.5 text-[9.5px] font-semibold uppercase tracking-[0.14em] text-teal-700 dark:text-teal-300">
                   ONU
                 </span>
+                <span className="rounded-md bg-violet-500/15 px-2 py-0.5 text-[9.5px] font-semibold uppercase tracking-[0.14em] text-violet-700 dark:text-violet-300">
+                  {(onu.ponType ?? 'gpon').toUpperCase()} {onu.onuClass ?? 'B+'}
+                </span>
               </div>
               <SheetTitle className="font-display text-[17px]">{onu.username}</SheetTitle>
               <SheetDescription>
@@ -129,6 +145,152 @@ export function OnuDetailPanel({
                   <p className="mt-1 font-mono text-[12px] font-semibold">{onu.vlanId ?? '—'}</p>
                 </div>
               </div>
+
+              {/* OPTICAL POWER BUDGET */}
+              <section className="rounded-2xl border border-violet-500/25 bg-violet-500/[0.04] p-3">
+                <div className="flex items-center justify-between gap-2">
+                  <p className="inline-flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">
+                    <Gauge className="size-3 text-violet-500" />
+                    Power budget · OLT → ONU
+                  </p>
+                  {budget ? <BudgetStatusBadge status={budget.status} /> : null}
+                </div>
+
+                {!budget ? (
+                  <p className="mt-2 rounded-xl border border-dashed border-border px-3 py-3 text-[11px] text-muted-foreground">
+                    Link this ONU through its TJ chain to an OLT to calculate the power budget.
+                  </p>
+                ) : (
+                  <div className="mt-2 space-y-2.5">
+                    <div className="flex flex-wrap items-center gap-1 font-mono text-[10px]">
+                      <span className="rounded bg-sky-500/15 px-1.5 py-0.5 font-semibold text-sky-700 dark:text-sky-300">
+                        {budget.oltCode}
+                      </span>
+                      {budget.route.slice(1, -1).map((node) => (
+                        <span key={`${node.kind}-${node.id}`} className="flex items-center gap-1">
+                          <ArrowRight className="size-2.5 text-muted-foreground" />
+                          <span className="rounded bg-white/60 px-1.5 py-0.5 text-foreground/80 dark:bg-white/[0.06]">
+                            {node.code}
+                          </span>
+                        </span>
+                      ))}
+                      <ArrowRight className="size-2.5 text-muted-foreground" />
+                      <span className="rounded bg-amber-500/15 px-1.5 py-0.5 font-semibold text-amber-700 dark:text-amber-300">
+                        {budget.onuCode}
+                      </span>
+                    </div>
+
+                    <div className="grid grid-cols-3 gap-1.5 text-center font-mono">
+                      <div className="rounded-xl border border-white/60 bg-white/60 p-1.5 dark:border-white/10 dark:bg-white/[0.04]">
+                        <p className="text-[8.5px] font-sans uppercase text-muted-foreground">
+                          OLT TX{budget.ponPort ? ` · ${budget.ponPort}` : ''}
+                        </p>
+                        <p className="text-[11.5px] font-semibold">{budget.txPowerDbm.toFixed(1)} dBm</p>
+                      </div>
+                      <div className="rounded-xl border border-white/60 bg-white/60 p-1.5 dark:border-white/10 dark:bg-white/[0.04]">
+                        <p className="text-[8.5px] font-sans uppercase text-muted-foreground">Total loss</p>
+                        <p className="text-[11.5px] font-semibold text-rose-500">
+                          −{budget.totalLossDb.toFixed(2)} dB
+                        </p>
+                      </div>
+                      <div className="rounded-xl border border-white/60 bg-white/60 p-1.5 dark:border-white/10 dark:bg-white/[0.04]">
+                        <p className="text-[8.5px] font-sans uppercase text-muted-foreground">ONU RX</p>
+                        <p className="text-[12px] font-bold text-primary">{budget.rxPowerDbm.toFixed(2)} dBm</p>
+                      </div>
+                    </div>
+
+                    <div className="space-y-1">
+                      <div className="flex items-center justify-between text-[10px] text-muted-foreground">
+                        <span>{budget.classInfo.label} ODN budget used</span>
+                        <span className="font-mono">
+                          {budget.budgetUsedPercent}% · margin {budget.marginDb.toFixed(2)} dB
+                        </span>
+                      </div>
+                      <div className="h-1.5 overflow-hidden rounded-full bg-white/60 dark:bg-white/[0.08]">
+                        <div
+                          className={cn(
+                            'h-full rounded-full transition-all',
+                            budget.status === 'ok'
+                              ? 'bg-emerald-500'
+                              : budget.status === 'marginal'
+                                ? 'bg-amber-500'
+                                : 'bg-rose-500',
+                          )}
+                          style={{ width: `${Math.min(100, Math.max(0, budget.budgetUsedPercent))}%` }}
+                        />
+                      </div>
+                      <p className="font-mono text-[9px] text-muted-foreground">
+                        {budget.classInfo.ponType.toUpperCase()} {budget.classInfo.label} · window{' '}
+                        {budget.classInfo.minLossDb}–{budget.classInfo.maxLossDb} dB · sensitivity{' '}
+                        {budget.classInfo.sensitivityDbm} dBm · overload{' '}
+                        {budget.classInfo.overloadDbm} dBm
+                      </p>
+                    </div>
+
+                    <div className="grid grid-cols-4 gap-1 text-center font-mono text-[10px]">
+                      <LossCell label="Fibre" value={budget.fibreLossDb} />
+                      <LossCell label="Splice" value={budget.spliceLossDb} />
+                      <LossCell label="Connector" value={budget.connectionLossDb} />
+                      <LossCell label="Splitter" value={budget.splittingLossDb} />
+                    </div>
+
+                    <div className="space-y-1">
+                      <p className="text-[9px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
+                        Route spans · {formatDistance(budget.distanceM)}
+                      </p>
+                      {budget.spans.map((span) => (
+                        <div
+                          key={span.linkId}
+                          className="rounded-lg border border-white/60 bg-white/55 px-2 py-1.5 dark:border-white/10 dark:bg-white/[0.03]"
+                        >
+                          <div className="flex items-center justify-between gap-2 font-mono text-[10px]">
+                            <span className="truncate">
+                              {span.fromCode} → {span.toCode}
+                            </span>
+                            <span className="shrink-0 font-semibold">{span.totalLossDb.toFixed(2)} dB</span>
+                          </div>
+                          <p className="mt-0.5 text-[9px] text-muted-foreground">
+                            {span.fibreId} · {formatDistance(span.lengthM)} · fibre {span.fibreLossDb.toFixed(2)}{' '}
+                            dB @ {span.attenuationDbPerKm} dB/km · splice {span.spliceLossDb.toFixed(2)} dB ·
+                            connector {span.connectionLossDb.toFixed(2)} dB
+                          </p>
+                        </div>
+                      ))}
+                      {budget.splitters.length > 0 ? (
+                        <div className="space-y-1 pt-0.5">
+                          {budget.splitters.map((splitter) => (
+                            <div
+                              key={splitter.tjId}
+                              className="flex items-center gap-1.5 rounded-lg border border-violet-500/25 bg-violet-500/[0.05] px-2 py-1 text-[10px]"
+                            >
+                              <Split className="size-3 shrink-0 text-violet-500" />
+                              <span className="min-w-0 flex-1 truncate font-mono">
+                                {splitter.tjCode} · splitter {splitter.ratio}
+                              </span>
+                              <span className="shrink-0 font-mono font-semibold text-rose-500">
+                                −{splitter.lossDb.toFixed(2)} dB
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      ) : null}
+                    </div>
+
+                    {budget.txAssumed ? (
+                      <p className="flex items-start gap-1.5 rounded-lg border border-amber-500/30 bg-amber-500/[0.08] px-2 py-1.5 text-[10px] text-amber-700 dark:text-amber-300">
+                        <TriangleAlert className="mt-0.5 size-3 shrink-0" />
+                        No output power on the OLT PON port; {budget.txPowerDbm} dBm launch power assumed.
+                      </p>
+                    ) : null}
+                    {budget.hasCut ? (
+                      <p className="flex items-start gap-1.5 rounded-lg border border-rose-500/30 bg-rose-500/[0.08] px-2 py-1.5 text-[10px] text-rose-700 dark:text-rose-300">
+                        <TriangleAlert className="mt-0.5 size-3 shrink-0" />
+                        Route crosses a cut fibre link; calculated power is for the intact path.
+                      </p>
+                    ) : null}
+                  </div>
+                )}
+              </section>
 
               <div className="rounded-2xl border border-white/55 bg-white/45 p-3 dark:border-white/[0.06] dark:bg-white/[0.02]">
                 <div className="flex items-center justify-between gap-2">
@@ -326,5 +488,40 @@ export function OnuDetailPanel({
         ) : null}
       </SheetContent>
     </Sheet>
+  );
+}
+
+function BudgetStatusBadge({ status }: { status: BudgetStatus }) {
+  const styles: Record<BudgetStatus, string> = {
+    ok: 'border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300',
+    marginal: 'border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-300',
+    over: 'border-rose-500/40 bg-rose-500/10 text-rose-700 dark:text-rose-300',
+    overload: 'border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-300',
+  };
+  const labels: Record<BudgetStatus, string> = {
+    ok: 'Within budget',
+    marginal: 'Marginal',
+    over: 'Over budget',
+    overload: 'RX overload',
+  };
+  return (
+    <span
+      className={cn(
+        'inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-[9.5px] font-semibold',
+        styles[status],
+      )}
+    >
+      {status === 'ok' ? <Zap className="size-2.5" /> : <TriangleAlert className="size-2.5" />}
+      {labels[status]}
+    </span>
+  );
+}
+
+function LossCell({ label, value }: { label: string; value: number }) {
+  return (
+    <div className="rounded-lg border border-white/60 bg-white/60 px-1 py-1 dark:border-white/10 dark:bg-white/[0.04]">
+      <p className="text-[8px] font-sans uppercase text-muted-foreground">{label}</p>
+      <p className="font-semibold">{value.toFixed(2)}</p>
+    </div>
   );
 }

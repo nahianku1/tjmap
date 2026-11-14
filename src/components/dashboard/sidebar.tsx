@@ -144,7 +144,6 @@ export function Sidebar({
             olt.uplinkPort,
             olt.areaName,
             ...olt.ponPorts.map((port) => port.label),
-            ...olt.ethernetPorts.map((port) => port.label),
           ]),
         )
         .sort((a, b) => a.code.localeCompare(b.code)),
@@ -399,7 +398,6 @@ export function Sidebar({
                           <span>
                             {ponUsed}/{olt.ponPorts.length} PON
                           </span>
-                          <span>{olt.ethernetPorts.length} ETH</span>
                           <span className="ml-auto inline-flex items-center gap-1">
                             <Cable className="size-3" />
                             {olt.tjCount} joints
