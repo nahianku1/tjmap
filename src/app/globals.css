@@ -575,16 +575,16 @@ body {
   position: relative;
   display: grid;
   place-items: center;
-  width: 30px;
-  height: 30px;
+  width: 26px;
+  height: 26px;
   border-radius: 999px;
   background: radial-gradient(circle at 30% 25%, rgba(255, 255, 255, 0.5), transparent 60%),
     color-mix(in oklab, var(--core-color) 22%, #060b16);
   border: 1px solid color-mix(in oklab, var(--core-color) 70%, transparent);
   box-shadow:
-    0 0 0 4px color-mix(in oklab, var(--core-color) 12%, transparent),
-    0 0 18px color-mix(in oklab, var(--core-color) 55%, transparent),
-    0 10px 20px -10px rgba(0, 0, 0, 0.8);
+    0 0 0 3px color-mix(in oklab, var(--core-color) 12%, transparent),
+    0 0 16px color-mix(in oklab, var(--core-color) 55%, transparent),
+    0 8px 16px -9px rgba(0, 0, 0, 0.8);
   transition: box-shadow 220ms ease, transform 220ms ease;
 }
 
@@ -597,6 +597,8 @@ body {
 }
 
 .tj-marker__icon {
+  width: 14px;
+  height: 14px;
   color: #eaf6ff;
   filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.6));
 }
@@ -613,7 +615,7 @@ body {
 
 .tj-marker__ring {
   position: absolute;
-  inset: -7px;
+  inset: -5px;
   border-radius: 999px;
   border: 1px solid color-mix(in oklab, var(--core-color) 45%, transparent);
   opacity: 0.65;
@@ -686,16 +688,16 @@ html:not(.dark) .tj-marker__chip {
   position: relative;
   display: grid;
   place-items: center;
-  width: 42px;
-  height: 42px;
-  border-radius: 12px;
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
   overflow: hidden;
   background: #0b1220;
   border: 1px solid rgba(56, 189, 248, 0.75);
   box-shadow:
-    0 0 0 4px rgba(14, 165, 233, 0.14),
-    0 0 20px rgba(14, 165, 233, 0.45),
-    0 10px 20px -10px rgba(0, 0, 0, 0.8);
+    0 0 0 3px rgba(14, 165, 233, 0.14),
+    0 0 16px rgba(14, 165, 233, 0.45),
+    0 8px 16px -9px rgba(0, 0, 0, 0.8);
 }
 
 .olt-marker__tile img {
@@ -705,23 +707,10 @@ html:not(.dark) .tj-marker__chip {
 }
 
 .olt-marker__tile svg {
+  width: 14px;
+  height: 14px;
   color: #7dd3fc;
   filter: drop-shadow(0 0 6px rgba(56, 189, 248, 0.55));
-}
-
-.olt-marker__badge {
-  position: absolute;
-  top: -5px;
-  right: -8px;
-  font-family: var(--font-mono);
-  font-size: 7.5px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  padding: 2px 4px;
-  border-radius: 4px;
-  color: #04121f;
-  background: linear-gradient(135deg, #7dd3fc, #0ea5e9);
-  box-shadow: 0 4px 10px -6px rgba(14, 165, 233, 0.9);
 }
 
 .olt-marker__chip {
@@ -737,11 +726,11 @@ html:not(.dark) .tj-marker__chip {
 
 .tj-marker__pulse {
   position: absolute;
-  top: 10px;
+  top: 0;
   left: 50%;
-  width: 30px;
-  height: 30px;
-  margin-left: -15px;
+  width: 26px;
+  height: 26px;
+  margin-left: -13px;
   border-radius: 999px;
   border: 2px solid rgba(251, 113, 133, 0.9);
   animation: pulse-ring 2.4s cubic-bezier(0.2, 0.7, 0.4, 1) infinite;
@@ -761,18 +750,18 @@ html:not(.dark) .tj-marker__chip {
 
 .tj-marker__cut-badge {
   position: absolute;
-  top: -7px;
-  right: -9px;
+  top: -4px;
+  right: -5px;
   display: grid;
   place-items: center;
-  width: 15px;
-  height: 15px;
+  width: 11px;
+  height: 11px;
   border-radius: 999px;
   background: #fb7185;
   color: #2b0a10;
-  font-size: 9px;
+  font-size: 6.5px;
   font-weight: 800;
-  box-shadow: 0 0 14px rgba(251, 113, 133, 0.85);
+  box-shadow: 0 0 10px rgba(251, 113, 133, 0.85);
   border: 1px solid rgba(255, 255, 255, 0.5);
 }
 
@@ -861,8 +850,8 @@ html:not(.dark) .link-label {
 .onu-marker:hover { transform: translateY(-2px) scale(1.04); z-index: 5; }
 
 .onu-marker__pin {
-  width: 30px;
-  height: 30px;
+  width: 26px;
+  height: 26px;
   border-radius: 999px;
   display: grid;
   place-items: center;
@@ -870,9 +859,9 @@ html:not(.dark) .link-label {
   background: linear-gradient(145deg, #fbbf24, #f59e0b 55%, #d97706);
   border: 2px solid rgba(255, 255, 255, 0.9);
   box-shadow:
-    0 0 0 4px rgba(245, 158, 11, 0.18),
-    0 0 18px rgba(245, 158, 11, 0.55),
-    0 10px 20px -10px rgba(0, 0, 0, 0.75);
+    0 0 0 3px rgba(245, 158, 11, 0.18),
+    0 0 16px rgba(245, 158, 11, 0.55),
+    0 8px 16px -9px rgba(0, 0, 0, 0.75);
 }
 
 .dark .onu-marker__pin {

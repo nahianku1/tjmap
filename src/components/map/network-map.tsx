@@ -578,7 +578,7 @@ function syncLinkData(map: maplibregl.Map, links: FibreLink[], selectedLinkId: s
 }
 
 /** Lucide-style icon markup shared by the device pins. */
-function pinIcon(paths: string, size = 16): string {
+function pinIcon(paths: string, size = 14): string {
   return `<svg class="tj-marker__icon" viewBox="0 0 24 24" width="${size}" height="${size}" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths}</svg>`;
 }
 
@@ -589,7 +589,6 @@ const TJ_ICON = pinIcon(
 // OLT: a rack-mounted optical line terminal.
 const OLT_ICON = pinIcon(
   '<rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><path d="M6 6h.01"/><path d="M6 18h.01"/>',
-  22,
 );
 // ONU: the subscriber's wireless router.
 const ONU_ICON = pinIcon(
@@ -604,7 +603,7 @@ function buildMarkerContent(tj: Tj): string {
     <span class="tj-marker__pin">
       ${TJ_ICON}
       <span class="tj-marker__ring"></span>
-      ${isCut ? '<span class="tj-marker__cut-badge">!</span>' : isPon ? '<span class="tj-marker__cut-badge" style="background:#f59e0b;color:#000;font-size:8px;">⚡</span>' : ''}
+      ${isCut ? '<span class="tj-marker__cut-badge">!</span>' : isPon ? '<span class="tj-marker__cut-badge" style="background:#f59e0b;color:#000;font-size:6px;">⚡</span>' : ''}
     </span>
     <span class="tj-marker__chip">${escapeHtml(tj.code)}${isPon ? ' · PON' : ''}</span>
   `;
@@ -623,7 +622,6 @@ function buildOltMarkerContent(olt: Olt): string {
   return `
     <span class="olt-marker__tile">
       ${OLT_ICON}
-      <span class="olt-marker__badge">OLT</span>
     </span>
     <span class="tj-marker__chip olt-marker__chip">${escapeHtml(olt.code)}</span>
   `;
