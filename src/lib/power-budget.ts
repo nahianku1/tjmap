@@ -25,6 +25,10 @@ export interface BudgetSpan {
   fibreLossDb: number;
   spliceLossDb: number;
   connectionLossDb: number;
+  /** Cable strand this span uses, when the device is patched to a core. */
+  coreLabel: string | null;
+  /** Extra loss recorded on that strand (a repaired or degraded core). */
+  extraLossDb: number;
   totalLossDb: number;
 }
 
@@ -66,6 +70,8 @@ export interface PowerBudget {
   budgetUsedPercent: number;
   status: BudgetStatus;
   hasCut: boolean;
+  /** Cores on the route that are marked damaged or cut, so no light reaches the ONU. */
+  coreFaults: string[];
 }
 
 function round2(value: number): number {
@@ -198,9 +204,45 @@ export function computeOnuPowerBudget(
   const txAssumed = port?.outputDbm === null || port?.outputDbm === undefined;
   const txPowerDbm = txAssumed ? DEFAULT_OLT_TX_DBM : Number(port!.outputDbm);
 
+  const coreFaults: string[] = [];
+
+  /** The cable strand a device terminates on, and whether that core is broken. */
+  const strandFor = (key: NodeKey | undefined, link: FibreLink) => {
+    if (!key) return { label: null as string | null, extraLossDb: 0, fault: null as string | null };
+    const [kind, id] = key.split(':');
+    const atFrom =
+      (kind === 'tj' && link.fromTjId === id) ||
+      (kind === 'olt' && link.fromOltId === id) ||
+      (kind === 'onu' && link.fromOnuId === id);
+    const row = (link.cores ?? []).find((core) =>
+      Boolean(atFrom ? core.fromCoreLabel : core.toCoreLabel),
+    );
+    if (!row) return { label: null as string | null, extraLossDb: 0, fault: null as string | null };
+    const localCore = (atFrom ? row.fromCoreLabel : row.toCoreLabel) ?? null;
+    let fault: string | null = null;
+    if (kind === 'tj') {
+      const tj = tjs.find((item) => item.id === id);
+      const core = tj?.cores?.find((item) => item.label === localCore);
+      if (core?.status === 'damaged') fault = `${tj?.code ?? 'TJ'} ${localCore ?? 'core'} damaged`;
+    } else if (kind === 'onu') {
+      const onu = onus.find((item) => item.id === id);
+      const core = onu?.cores?.find((item) => item.label === localCore);
+      if (core?.status === 'damaged') {
+        fault = `${onu?.username ?? 'ONU'} ${localCore ?? 'core'} damaged`;
+      }
+    }
+    return {
+      label: row.label,
+      extraLossDb: round2(Number(row.lossDb ?? 0)),
+      fault,
+    };
+  };
+
   const spans: BudgetSpan[] = linksDesc.map((link, index) => {
     const fromKey = nodes[index];
     const toKey = nodes[index + 1];
+    const strand = strandFor(fromKey, link);
+    if (strand.fault) coreFaults.push(`${link.fibreId} · ${strand.fault}`);
     const fromCode = (fromKey ? nodeInfo(fromKey, tjs, olts, onus)?.code : null) ?? link.fromCode;
     const toCode = (toKey ? nodeInfo(toKey, tjs, olts, onus)?.code : null) ?? link.toCode;
     const lengthM = link.lengthM ?? null;
@@ -220,7 +262,9 @@ export function computeOnuPowerBudget(
       fibreLossDb,
       spliceLossDb,
       connectionLossDb,
-      totalLossDb: round2(fibreLossDb + spliceLossDb + connectionLossDb),
+      coreLabel: strand.label,
+      extraLossDb: strand.extraLossDb,
+      totalLossDb: round2(fibreLossDb + spliceLossDb + connectionLossDb + strand.extraLossDb),
     };
   });
 
@@ -229,12 +273,34 @@ export function computeOnuPowerBudget(
     const key = nodes[index];
     if (!key || !key.startsWith('tj:')) continue;
     const tj = tjs.find((item) => item.id === key.split(':')[1]);
-    if (!tj?.splitter?.enabled || !tj.splitter.ratio) continue;
+    if (!tj) continue;
+    // A joint may carry several splitters, but each is its own parallel feed: only
+    // the splitter whose output leg the route leaves through adds loss here.
+    const fitted = (tj.splitters?.length ? tj.splitters : tj.splitter ? [tj.splitter] : []).filter(
+      (splitter) => splitter?.enabled && splitter.ratio,
+    );
+    if (fitted.length === 0) continue;
+
+    const outgoing = linksDesc[index];
+    const atFrom = outgoing?.fromTjId === tj.id;
+    const atTo = outgoing?.toTjId === tj.id;
+    let localCore: string | null = null;
+    if (outgoing && (atFrom || atTo)) {
+      const row = (outgoing.cores ?? []).find((core) =>
+        Boolean(atFrom ? core.fromCoreLabel : core.toCoreLabel),
+      );
+      localCore = row ? (atFrom ? row.fromCoreLabel : row.toCoreLabel) : null;
+    }
+    const splitter =
+      fitted.find((item) =>
+        (item.outputs ?? []).some((core) => core.label === localCore),
+      ) ?? fitted[0];
+    if (!splitter?.ratio) continue;
     splitters.push({
       tjId: tj.id,
       tjCode: tj.code,
-      ratio: tj.splitter.ratio,
-      lossDb: getSplitterLossDb(tj.splitter.ratio, 0.2),
+      ratio: splitter.ratio,
+      lossDb: getSplitterLossDb(splitter.ratio, 0.2),
     });
   }
 
@@ -242,8 +308,9 @@ export function computeOnuPowerBudget(
   const spliceLossDb = round2(spans.reduce((sum, span) => sum + span.spliceLossDb, 0));
   const connectionLossDb = round2(spans.reduce((sum, span) => sum + span.connectionLossDb, 0));
   const splittingLossDb = round2(splitters.reduce((sum, splitter) => sum + splitter.lossDb, 0));
+  const coreExtraLossDb = round2(spans.reduce((sum, span) => sum + span.extraLossDb, 0));
   const totalLossDb = round2(
-    fibreLossDb + spliceLossDb + connectionLossDb + splittingLossDb,
+    fibreLossDb + spliceLossDb + connectionLossDb + splittingLossDb + coreExtraLossDb,
   );
   const rxPowerDbm = round2(txPowerDbm - totalLossDb);
   const distanceM = Math.round(
@@ -292,6 +359,7 @@ export function computeOnuPowerBudget(
     budgetUsedPercent,
     status,
     hasCut: linksDesc.some((link) => link.status === 'cut'),
+    coreFaults,
   };
 }
 

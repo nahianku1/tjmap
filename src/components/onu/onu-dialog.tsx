@@ -25,7 +25,8 @@ import { Textarea } from '@/components/ui/textarea';
 import { CoreEditor } from '@/components/map/core-editor';
 import { api, ApiError } from '@/lib/api';
 import { ONU_CLASS_OPTIONS, getOnuClassInfo } from '@/lib/optical';
-import type { Area, Core, Onu, OnuClass, PonType } from '@/lib/types';
+import { FibreCorePicker } from '@/components/map/fibre-core-picker';
+import type { Area, Core, FibreLink, Onu, OnuClass, PonType } from '@/lib/types';
 
 interface OnuDialogProps {
   open: boolean;
@@ -35,6 +36,11 @@ interface OnuDialogProps {
   draftPoint?: { lat: number; lng: number } | null;
   /** Area to assign when dropped on an area map. */
   defaultAreaId?: string | null;
+  /** Fibre ID of the link connected to this ONU; set, the field is read-only. */
+  linkedFibreId?: string | null;
+  /** Fibre spans on this map, used to move the ONU onto another cable core. */
+  links?: FibreLink[];
+  onLinksChanged?: () => void | Promise<void>;
   onSaved: (onu: Onu, mode: 'create' | 'update') => void;
 }
 
@@ -64,6 +70,9 @@ export function OnuDialog({
   onu,
   draftPoint,
   defaultAreaId,
+  linkedFibreId,
+  links = [],
+  onLinksChanged,
   onSaved,
 }: OnuDialogProps) {
   const [username, setUsername] = useState('');
@@ -128,10 +137,6 @@ export function OnuDialog({
       setError('Username is required.');
       return;
     }
-    if (!fid) {
-      setError('Fibre ID is required.');
-      return;
-    }
     if (cores.length === 0) {
       setError('Add at least one core for this fibre.');
       return;
@@ -150,13 +155,15 @@ export function OnuDialog({
       setError('VLAN ID must be a whole number between 1 and 4094.');
       return;
     }
+    // Validate fibre ID length (optional field, but if provided must be 1-60 chars).
+    if (fid && fid.length < 1) return setError('Fibre ID must be at least 1 character.');
+    if (fid && fid.length > 60) return setError('Fibre ID must be at most 60 characters.');
 
     setSaving(true);
     setError(null);
     try {
       const payload = {
         username: name,
-        fibreId: fid,
         macAddress: mac || undefined,
         vlanId: parsedVlanId,
         ponType,
@@ -170,7 +177,11 @@ export function OnuDialog({
         notes: notes.trim() || undefined,
         ...(lat.trim() && lng.trim() ? { lat: Number(lat), lng: Number(lng) } : {}),
       };
-      const saved = onu ? await api.updateOnu(onu.id, payload) : await api.createOnu(payload);
+      const payloadWithFibre = {
+        ...payload,
+        fibreId: fid || undefined,
+      };
+      const saved = onu ? await api.updateOnu(onu.id, payloadWithFibre) : await api.createOnu(payloadWithFibre);
       toast.success(onu ? `${saved.username} updated` : `${saved.username} added`, {
         description: `${saved.fibreId} · ${saved.cores.length} core${
           saved.cores.length === 1 ? '' : 's'
@@ -246,12 +257,17 @@ export function OnuDialog({
               <Label htmlFor="onu-fibre-id">Fibre ID</Label>
               <Input
                 id="onu-fibre-id"
-                required
                 placeholder="F-DHK-GL-09"
                 value={fibreId}
                 onChange={(e) => setFibreId(e.target.value)}
                 className="font-mono text-[12px]"
+                disabled={Boolean(linkedFibreId)}
               />
+              {linkedFibreId ? (
+                <p className="text-[10px] text-muted-foreground">
+                  Taken from the fibre linked to this ONU — remove that link to set it by hand.
+                </p>
+              ) : null}
             </div>
             <div className="space-y-1.5">
               <Label htmlFor="onu-pon-type">PON technology</Label>
@@ -349,6 +365,15 @@ export function OnuDialog({
               emptyLabel="Add at least one core for this fibre"
             />
           </section>
+
+          {onu ? (
+            <FibreCorePicker
+              kind="onu"
+              deviceId={onu.id}
+              links={links}
+              onPatched={onLinksChanged}
+            />
+          ) : null}
 
           <div className="space-y-1.5">
             <Label htmlFor="onu-notes">Notes</Label>

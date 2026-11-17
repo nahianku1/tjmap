@@ -33,6 +33,7 @@ import { Badge } from '@/components/ui/badge';
 import { Separator } from '@/components/ui/separator';
 import type { DeviceKind, FibreLink } from '@/lib/types';
 import { computeSpanLoss } from '@/lib/power-budget';
+import { coreInTubeOf, tiaCoreName, tubeCoreLabel, tubeOf } from '@/lib/fibre-cores';
 import { cn, formatDistance } from '@/lib/utils';
 
 interface LinkDetailPanelProps {
@@ -131,6 +132,9 @@ export function LinkDetailPanel({
               <SheetDescription>
                 {KIND_LABEL[link.fromKind]} to {KIND_LABEL[link.toKind]} ·{' '}
                 {formatDistance(link.lengthM)} · {stats.total} cores
+                {stats.total > 0
+                  ? ` · ${tubeOf(stats.total)} tube${tubeOf(stats.total) === 1 ? '' : 's'}`
+                  : ''}
                 {path.length > 0 ? ` · ${path.length} bends` : ' · straight route'}
               </SheetDescription>
             </SheetHeader>
@@ -165,13 +169,13 @@ export function LinkDetailPanel({
                 />
               </div>
 
-              {/* OPTICAL SPAN LOSS */}
+              {/* OPTICAL LINK LOSS */}
               {spanLoss ? (
                 <section className="rounded-2xl border border-amber-500/25 bg-amber-500/[0.04] p-3">
                   <div className="mb-2 flex items-center justify-between gap-2">
                     <p className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">
                       <Ruler className="size-3 text-amber-500" />
-                      Span loss
+                      Link loss
                     </p>
                     <span className="font-mono text-[12px] font-semibold text-amber-700 dark:text-amber-300">
                       {spanLoss.totalLossDb.toFixed(2)} dB
@@ -237,7 +241,12 @@ export function LinkDetailPanel({
                   <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-muted-foreground">
                     Fibre cores ({stats.connected} in use · {stats.free} free)
                   </p>
-                  <span className="font-mono text-[10px] text-muted-foreground">{stats.total} cores</span>
+                  <span className="font-mono text-[10px] text-muted-foreground">
+                    {stats.total} cores
+                    {stats.total > 0
+                      ? ` · ${tubeOf(stats.total)} tube${tubeOf(stats.total) === 1 ? '' : 's'}`
+                      : ''}
+                  </span>
                 </div>
                 {(link.cores?.length ?? 0) === 0 ? (
                   <p className="rounded-xl border border-dashed border-border px-3 py-4 text-center text-[11px] text-muted-foreground">
@@ -266,6 +275,17 @@ export function LinkDetailPanel({
                             <span className="min-w-0 flex-1 truncate text-[11.5px] font-medium">
                               {core.label || `Core ${index + 1}`}
                             </span>
+                            {(() => {
+                              const strand = Number(core.index) || index + 1;
+                              return (
+                                <span
+                                  className="shrink-0 rounded bg-muted/70 px-1.5 py-0.5 font-mono text-[9px] font-semibold text-foreground/80"
+                                  title={`Tube ${tubeOf(strand)} · core ${coreInTubeOf(strand)} · ${tiaCoreName(strand)}`}
+                                >
+                                  {tubeCoreLabel(strand)}
+                                </span>
+                              );
+                            })()}
                             <span
                               className={cn(
                                 'inline-flex items-center rounded-md px-1.5 py-0.5 text-[9.5px] font-semibold',

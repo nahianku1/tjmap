@@ -20,6 +20,7 @@ import {
   Trash2,
   TriangleAlert,
   Unlink,
+  Wand2,
   Zap,
 } from 'lucide-react';
 import { toast } from 'sonner';
@@ -71,7 +72,9 @@ import {
   findUpstreamPower,
   getTjInputCoreLabel,
 } from '@/lib/core-power';
+import { FibreCorePicker } from '@/components/map/fibre-core-picker';
 import { cn } from '@/lib/utils';
+import { tiaCoreColor, tubeCoreLabel } from '@/lib/fibre-cores';
 
 interface TjFormDialogProps {
   open: boolean;
@@ -87,33 +90,140 @@ interface TjFormDialogProps {
   tjs: Tj[];
   olts: Olt[];
   links: FibreLink[];
+  /** Called after the joint is re-patched onto another cable core. */
+  onLinksChanged?: () => void | Promise<void>;
   onSaved: (tj: Tj, mode: 'create' | 'update') => void;
 }
 
-const FIBRE_COLOR_PALETTE = [
-  '#2563eb', // 1: Blue
-  '#ea580c', // 2: Orange
-  '#16a34a', // 3: Green
-  '#854d0e', // 4: Brown
-  '#64748b', // 5: Slate
-  '#e2e8f0', // 6: White
-  '#dc2626', // 7: Red
-  '#1e293b', // 8: Black
-  '#ca8a04', // 9: Yellow
-  '#9333ea', // 10: Violet
-  '#e11d48', // 11: Rose
-  '#0891b2', // 12: Aqua
+const RATIO_OPTIONS: SplitRatio[] = [
+  '1:2',
+  '1:4',
+  '1:8',
+  '1:16',
+  '1:32',
+  '1:64',
+  '50:50',
+  '80:20',
+  '70:30',
+  '90:10',
 ];
 
 function generateUserFibreCores(count: number): UserFibreCore[] {
   const safeCount = Math.min(48, Math.max(1, count));
   return Array.from({ length: safeCount }, (_, i) => ({
     coreIndex: i + 1,
-    label: `Core ${String(i + 1).padStart(2, '0')}`,
-    color: FIBRE_COLOR_PALETTE[i % FIBRE_COLOR_PALETTE.length],
+    label: tubeCoreLabel(i + 1),
+    color: tiaCoreColor(i + 1),
     status: 'free' as CoreStatus,
     connectedToOutputCore: false,
   }));
+}
+
+/**
+ * A splitter joint has one input strand per splitter, never a pool of input
+ * cores: this rebuilds the input list from the splitters' feed cores.
+ */
+/** True while a cable link owns this strand, which is what keeps it in use. */
+function coreOwnedByLink(core: Core): boolean {
+  return Boolean(core.connectedLinkId);
+}
+
+function inputCoresForFeeds(cores: Core[], feeds: string[]): Core[] {
+  const unique = feeds.filter((label, index) => feeds.indexOf(label) === index);
+  return unique.map((label, index) => {
+    const found = cores.find((core) => core.label === label);
+    // The splitter's input strand stays free so the incoming cable can be
+    // patched to it; only a cable owns it, and only then is it in use.
+    const status = found && coreOwnedByLink(found) ? ('in_use' as const) : ('free' as const);
+    return found
+      ? { ...found, count: 1, status }
+      : {
+          label: label || tubeCoreLabel(index + 1),
+          color: tiaCoreColor(index + 1),
+          count: 1,
+          status,
+        };
+  });
+}
+
+/** Next unused input-core label, matching the joint's existing numbering style. */
+function nextInputCoreLabel(cores: Core[]): string {
+  const used = new Set(cores.map((core) => core.label.trim()));
+  // Joints label strands either `Core 01` or `T1-01`; follow whichever the joint uses.
+  const plain = cores.length === 0 || /^Core \d+$/i.test(cores[0].label.trim());
+  const labelAt = (index: number) =>
+    plain ? `Core ${String(index).padStart(2, '0')}` : tubeCoreLabel(index);
+  let candidate = cores.length + 1;
+  while (used.has(labelAt(candidate))) candidate += 1;
+  return labelAt(candidate);
+}
+
+/** Next free feed label in the joint's numbering style. */
+function nextFeedLabel(usedLabels: string[]): string {
+  return nextInputCoreLabel(
+    usedLabels.map((label) => ({ label, color: tiaCoreColor(1), count: 1 })),
+  );
+}
+
+/**
+ * Inline feed-name field. Edits stay local until blur so clearing the field
+ * cannot blank the splitter's feed label mid-rename.
+ */
+function FeedLabelField({
+  value,
+  onRename,
+  ariaLabel,
+  placeholder,
+  className,
+}: {
+  value: string;
+  onRename: (label: string) => void;
+  ariaLabel: string;
+  placeholder?: string;
+  className?: string;
+}) {
+  const [draft, setDraft] = useState(value);
+  const editing = useRef(false);
+
+  useEffect(() => {
+    if (!editing.current) setDraft(value);
+  }, [value]);
+
+  return (
+    <input
+      value={draft}
+      aria-label={ariaLabel}
+      placeholder={placeholder}
+      onChange={(event) => setDraft(event.target.value)}
+      onFocus={() => {
+        editing.current = true;
+      }}
+      onBlur={() => {
+        editing.current = false;
+        const next = draft.trim();
+        if (!next) {
+          setDraft(value);
+          return;
+        }
+        if (next !== value) onRename(next);
+      }}
+      onKeyDown={(event) => {
+        if (event.key === 'Enter') {
+          event.preventDefault();
+          event.currentTarget.blur();
+        }
+      }}
+      className={className}
+    />
+  );
+}
+
+/** An additional splitter in the same joint: one feed core, one ratio, many outputs. */
+interface ExtraSplitter {
+  id: string;
+  inputCoreLabel: string;
+  ratio: SplitRatio;
+  outputs: Core[];
 }
 
 interface FormState {
@@ -131,6 +241,8 @@ interface FormState {
   splitterEnabled: boolean;
   ratio: SplitRatio;
   inputCoreLabel: string;
+  /** Extra splitters fitted alongside the primary one. */
+  extraSplitters: ExtraSplitter[];
   // Fibre cut details
   isCut: boolean;
   cutReason: string;
@@ -156,17 +268,13 @@ const EMPTY_FORM: FormState = {
   lat: '',
   lng: '',
   notes: '',
-  cores: [
-    { label: 'Core 01', color: '#22d3ee', count: 1, status: 'free' },
-    { label: 'Core 02', color: '#34d399', count: 1, status: 'free' },
-    { label: 'Core 03', color: '#a78bfa', count: 1, status: 'free' },
-    { label: 'Core 04', color: '#fbbf24', count: 1, status: 'free' },
-  ],
+  cores: [{ label: tubeCoreLabel(1), color: tiaCoreColor(1), count: 1, status: 'free' }],
   outputCores: [],
   userFibres: [],
   splitterEnabled: false,
   ratio: '1:8',
-  inputCoreLabel: 'Core 01',
+  inputCoreLabel: tubeCoreLabel(1),
+  extraSplitters: [],
   isCut: false,
   cutReason: '',
   cutSeverity: 'major',
@@ -194,6 +302,7 @@ export function TjFormDialog({
   tjs,
   olts,
   links,
+  onLinksChanged,
   onSaved,
 }: TjFormDialogProps) {
   const [form, setForm] = useState<FormState>(EMPTY_FORM);
@@ -224,6 +333,48 @@ export function TjFormDialog({
     setSplitterError(null);
     if (initial) {
       const tjType = initial.tjType ?? (initial.isCut ? 'cut' : 'box');
+      const splitterEnabled = initial.splitter?.enabled ?? false;
+      const baseCores =
+        initial.cores?.length > 0
+          ? initial.cores.map((c) => ({ ...c, count: 1, status: c.status ?? 'free' }))
+          : EMPTY_FORM.cores;
+      const primaryRatio = (initial.splitter?.ratio as SplitRatio) ?? '1:8';
+
+      // Every splitter gets exactly one input core. Older rows can repeat the
+      // feed (or omit it), so allocate a free label whenever it collides.
+      const feeds: string[] = [];
+      const primaryFeed = splitterEnabled
+        ? initial.splitter?.inputCoreLabel ?? baseCores[0]?.label ?? tubeCoreLabel(1)
+        : null;
+      if (primaryFeed) feeds.push(primaryFeed);
+
+      const extraSplitters = (initial.splitters ?? []).slice(1).map((extra, index) => {
+        const ratio = (extra.ratio as SplitRatio) ?? '1:8';
+        const wanted = extra.inputCoreLabel ?? '';
+        const inputCoreLabel =
+          wanted && !feeds.includes(wanted) ? wanted : nextFeedLabel(feeds);
+        feeds.push(inputCoreLabel);
+        const stored = (extra.outputs ?? []).map((core) => ({ ...core, count: 1 }));
+        return {
+          id: `splitter-${index + 2}`,
+          inputCoreLabel,
+          ratio,
+          // A splitter always exposes its branches: regenerate missing legs.
+          outputs: stored.length > 0 ? stored : makeExtraOutputs(ratio, null, index + 2),
+        };
+      });
+
+      const storedOutputs = (
+        initial.outputCores && initial.outputCores.length > 0
+          ? initial.outputCores
+          : initial.splitter?.outputs ?? []
+      ).map((core) => ({ ...core, count: 1, status: core.status ?? 'free' }));
+      const outputCores =
+        storedOutputs.length > 0
+          ? storedOutputs
+          : splitterEnabled
+            ? generateSplitterOutputs(primaryRatio, null)
+            : [];
       setForm({
         code: initial.code,
         name: initial.name ?? '',
@@ -233,30 +384,13 @@ export function TjFormDialog({
         lat: initial.lat.toFixed(6),
         lng: initial.lng.toFixed(6),
         notes: initial.notes ?? '',
-        cores:
-          initial.cores?.length > 0
-            ? initial.cores.map((c) => ({
-                ...c,
-                count: 1,
-                status: c.status ?? 'free',
-              }))
-            : EMPTY_FORM.cores,
-        outputCores:
-          initial.outputCores && initial.outputCores.length > 0
-            ? initial.outputCores.map((c) => ({
-                ...c,
-                count: 1,
-                status: c.status ?? 'free',
-              }))
-            : initial.splitter?.outputs?.map((c) => ({
-                ...c,
-                count: 1,
-                status: c.status ?? 'free',
-              })) ?? [],
+        cores: splitterEnabled ? inputCoresForFeeds(baseCores, feeds) : baseCores,
+        outputCores,
         userFibres: initial.userFibres ?? [],
-        splitterEnabled: initial.splitter?.enabled ?? false,
-        ratio: (initial.splitter?.ratio as SplitRatio) ?? '1:8',
-        inputCoreLabel: initial.splitter?.inputCoreLabel ?? initial.cores?.[0]?.label ?? 'Core 01',
+        splitterEnabled,
+        ratio: primaryRatio,
+        inputCoreLabel: primaryFeed ?? feeds[0] ?? tubeCoreLabel(1),
+        extraSplitters,
         isCut: initial.isCut ?? tjType === 'cut',
         cutReason: initial.cutReason ?? '',
         cutSeverity: initial.cutSeverity ?? 'major',
@@ -286,7 +420,7 @@ export function TjFormDialog({
         address: draftAddress || '',
         name: draftAddress ? draftAddress.split(',')[0] : '',
         fibreId: prefillFibreId || '',
-        cores: prefill ?? EMPTY_FORM.cores,
+        cores: prefill ? inputCoresForFeeds(prefill, [prefill[0].label]) : EMPTY_FORM.cores,
         damagedCores: String(damaged),
         restoredCores: String(restored),
         areaId: defaultAreaId ?? 'none',
@@ -331,6 +465,8 @@ export function TjFormDialog({
       ? calculateOutputPower(inputPowerNum, form.ratio, 0.2)
       : null;
   const powerAssessment = assessOpticalPower(outputPowerDbm);
+  const primaryFeedColor =
+    form.cores.find((core) => core.label === form.inputCoreLabel)?.color ?? tiaCoreColor(1);
 
   // Keep every splitter leg's stored power in step with the auto-derived output.
   useEffect(() => {
@@ -389,32 +525,27 @@ export function TjFormDialog({
   }
 
   // Handle adding or removing optical splitter:
-  // - Enabling: automatically connects to a free input core and marks it In Use.
-  // - Disabling: automatically releases that connected core back to Free.
+  // - Enabling: gives it one feed core that stays available for its link.
+  // - Disabling: drops that feed core from the input list again.
   function handleToggleSplitter(enabled: boolean) {
     if (enabled) {
-      const preferred = form.cores.find(
-        (c) => c.label === form.inputCoreLabel && (c.status ?? 'free') === 'free',
+      // Every splitter owns one feed strand. Reuse a free core that no other
+      // splitter is feeding from, or allocate a fresh input core for this one.
+      const taken = new Set(form.extraSplitters.map((item) => item.inputCoreLabel));
+      const usable = form.cores.filter(
+        (core) => (core.status ?? 'free') === 'free' && !taken.has(core.label),
       );
-      const freeCore = preferred ?? form.cores.find((c) => (c.status ?? 'free') === 'free');
+      const preferred = usable.find((core) => core.label === form.inputCoreLabel);
+      const feedLabel =
+        (preferred ?? usable[0])?.label ??
+        nextFeedLabel([...new Set(form.cores.map((core) => core.label))]);
 
-      if (!freeCore) {
-        const errorMsg =
-          'Cannot add splitter: All input cores are currently in use or cut. A splitter requires a free input core.';
-        setSplitterError(errorMsg);
-        toast.error('No Free Core Available', {
-          description: errorMsg,
-        });
-        return;
-      }
-
-      // Automatically update the connected input core to 'in_use'
-      const updatedCores = form.cores.map((c) =>
-        c.label === freeCore.label ? { ...c, status: 'in_use' as const } : c,
-      );
+      // A splitter joint keeps exactly one input strand per splitter; the feed
+      // core stays free until the incoming cable is patched to it.
+      const updatedCores = inputCoresForFeeds(form.cores, [feedLabel, ...taken]);
 
       // Derive initial output power from the power arriving on that core's link
-      const feedPower = upstreamPowerDbm(freeCore.label);
+      const feedPower = upstreamPowerDbm(feedLabel);
       const initialOutPower =
         feedPower !== null ? calculateOutputPower(feedPower, form.ratio, 0.2) : null;
 
@@ -426,20 +557,23 @@ export function TjFormDialog({
       setSplitterError(null);
       patch({
         splitterEnabled: true,
-        inputCoreLabel: freeCore.label,
+        inputCoreLabel: feedLabel,
         cores: updatedCores,
         outputCores: outputs,
       });
 
-      toast.success(
-        `Splitter enabled: connected to free core ${freeCore.label} (now marked In Use).`,
-      );
+      toast.success(`Splitter enabled: input core ${feedLabel} is ready for its link.`);
     } else {
-      // Revert the connected input core back to 'free'
+      // Keep only the extra splitters' feed strands; the removed splitter's feed
+      // stays as a free input core.
       const activeLabel = form.inputCoreLabel;
-      const updatedCores = form.cores.map((c) =>
-        c.label === activeLabel ? { ...c, status: 'free' as const } : c,
-      );
+      const extraFeeds = form.extraSplitters.map((item) => item.inputCoreLabel);
+      const updatedCores =
+        extraFeeds.length > 0
+          ? inputCoresForFeeds(form.cores, extraFeeds)
+          : form.cores.map((core) =>
+              core.label === activeLabel ? { ...core, status: 'free' as const } : core,
+            );
 
       setSplitterError(null);
       patch({
@@ -447,83 +581,37 @@ export function TjFormDialog({
         cores: updatedCores,
       });
 
-      toast.info(`Splitter removed: ${activeLabel} is now marked as Free.`);
+      toast.info(`Splitter removed: core ${activeLabel} is free again.`);
     }
-  }
-
-  // Handle selecting a splitter feed core:
-  // - If core is in use or damaged: show an explicit error message & toast!
-  // - If free: release old core to Free and set new core to In Use, and recalculate output power from new core's power.
-  function handleSelectSplitterCore(selectedLabel: string) {
-    const target = form.cores.find((c) => c.label === selectedLabel);
-    if (!target) return;
-
-    const currentStatus = target.status ?? 'free';
-
-    // If it's already the active feeding core and in_use
-    if (selectedLabel === form.inputCoreLabel && currentStatus === 'in_use' && !splitterError) {
-      return;
-    }
-
-    // Check if the target core is in use or cut
-    if (currentStatus !== 'free') {
-      const reason =
-        currentStatus === 'damaged'
-          ? 'cut / damaged'
-          : 'already in use (occupied)';
-      const errorMsg = `Cannot connect splitter to "${target.label}": This core is ${reason}. Splitters can only be connected to a free core.`;
-
-      setSplitterError(errorMsg);
-      patch({ inputCoreLabel: selectedLabel });
-      toast.error('Cannot connect to used core', {
-        description: errorMsg,
-      });
-      return;
-    }
-
-    // Target core is Free!
-    const prevLabel = form.inputCoreLabel;
-    const updatedCores = form.cores.map((c) => {
-      if (c.label === prevLabel && c.label !== selectedLabel) {
-        return { ...c, status: 'free' as const };
-      }
-      if (c.label === selectedLabel) {
-        return { ...c, status: 'in_use' as const };
-      }
-      return c;
-    });
-
-    // Recalculate output power from the new feeding core's upstream link
-    const targetPower = upstreamPowerDbm(selectedLabel);
-    const newOutPower =
-      targetPower !== null ? calculateOutputPower(targetPower, form.ratio, 0.2) : null;
-
-    const updatedOutputs = form.outputCores.map((out) => ({
-      ...out,
-      powerDbm: newOutPower,
-    }));
-
-    setSplitterError(null);
-    patch({
-      inputCoreLabel: selectedLabel,
-      cores: updatedCores,
-      outputCores: updatedOutputs,
-    });
-
-    toast.success(
-      `Splitter connected to ${selectedLabel}. (${prevLabel} restored to Free)`,
-    );
   }
 
   // Handle cores list update from CoreEditor: recalculate the splitter outputs
   // whenever the feeding core (or its upstream link) changes.
   function handleCoresChange(newCores: Core[]) {
     let err = splitterError;
-    const feedCore = newCores.find((c) => c.label === form.inputCoreLabel);
+
+    // The feed rows are editable, so a rename must follow through to the
+    // splitter that owns the strand (primary and extras alike).
+    const renames = new Map<string, string>();
+    form.cores.forEach((core, index) => {
+      const nextLabel = newCores[index]?.label;
+      if (nextLabel !== undefined && nextLabel !== core.label) {
+        renames.set(core.label, nextLabel);
+      }
+    });
+    const renameOf = (label: string) => renames.get(label) ?? label;
+    const inputCoreLabel = renameOf(form.inputCoreLabel);
+    const extraSplitters = form.extraSplitters.map((extra) =>
+      renames.has(extra.inputCoreLabel)
+        ? { ...extra, inputCoreLabel: renameOf(extra.inputCoreLabel) }
+        : extra,
+    );
+
+    const feedCore = newCores.find((c) => c.label === inputCoreLabel);
 
     if (form.splitterEnabled) {
       if (!feedCore) {
-        err = `Splitter feeding core "${form.inputCoreLabel}" was removed. Select a free core.`;
+        err = `Splitter feeding core "${inputCoreLabel}" was removed. Select a free core.`;
       } else if (feedCore.status === 'damaged') {
         err = `Splitter feeding core "${feedCore.label}" is marked as cut/damaged. Splitters require an intact free core.`;
       } else {
@@ -532,7 +620,7 @@ export function TjFormDialog({
     }
 
     // Automatically calculate new output power from the feed core's upstream link
-    const feedPower = upstreamPowerDbm(form.inputCoreLabel);
+    const feedPower = upstreamPowerDbm(inputCoreLabel);
 
     const calculatedOutPower =
       feedPower !== null ? calculateOutputPower(feedPower, form.ratio, 0.2) : null;
@@ -545,15 +633,41 @@ export function TjFormDialog({
     setSplitterError(err);
     patch({
       cores: newCores,
+      inputCoreLabel,
+      extraSplitters,
       outputCores: updatedOutputs,
     });
+  }
+
+  /** Renames a splitter feed strand in the joint's core inventory. */
+  function renameFeed(oldLabel: string, newLabel: string) {
+    if (!oldLabel) return;
+    setForm((current) => ({
+      ...current,
+      cores: current.cores.map((core) =>
+        core.label === oldLabel ? { ...core, label: newLabel } : core,
+      ),
+      inputCoreLabel: current.inputCoreLabel === oldLabel ? newLabel : current.inputCoreLabel,
+      extraSplitters: current.extraSplitters.map((item) =>
+        item.inputCoreLabel === oldLabel ? { ...item, inputCoreLabel: newLabel } : item,
+      ),
+    }));
+  }
+
+  /** Recolours a splitter feed strand in the joint's core inventory. */
+  function recolourFeed(label: string, color: string) {
+    if (!label) return;
+    setForm((current) => ({
+      ...current,
+      cores: current.cores.map((core) => (core.label === label ? { ...core, color } : core)),
+    }));
   }
 
   function handleAddOutputCore() {
     const nextNum = form.outputCores.length + 1;
     const newCore: Core = {
       label: `Leg ${String(nextNum).padStart(2, '0')}`,
-      color: FIBRE_COLOR_PALETTE[(nextNum - 1) % FIBRE_COLOR_PALETTE.length],
+      color: tiaCoreColor(nextNum),
       count: 1,
       status: 'free',
       powerDbm: outputPowerDbm,
@@ -678,8 +792,8 @@ export function TjFormDialog({
           const idx = existing.length + i + 1;
           return {
             coreIndex: idx,
-            label: `Core ${String(idx).padStart(2, '0')}`,
-            color: FIBRE_COLOR_PALETTE[(idx - 1) % FIBRE_COLOR_PALETTE.length],
+            label: tubeCoreLabel(idx),
+            color: tiaCoreColor(idx),
             status: 'free' as CoreStatus,
             connectedToOutputCore: false,
           };
@@ -834,6 +948,136 @@ export function TjFormDialog({
     });
   }
 
+  /** Output cores of an extra splitter, labelled per splitter and coloured TIA. */
+  function makeExtraOutputs(ratio: SplitRatio, power: number | null, ordinal: number): Core[] {
+    const preset = SPLITTER_RATIO_PRESETS[ratio];
+    const count = Math.min(preset ? preset.outputsCount : 8, 32);
+    return Array.from({ length: count }, (_value, index) => ({
+      label: `S${ordinal}-L${String(index + 1).padStart(2, '0')}`,
+      color: tiaCoreColor(index + 1),
+      count: 1,
+      status: 'free' as const,
+      powerDbm: power,
+    }));
+  }
+
+  function extraOutputPower(splitter: ExtraSplitter): number | null {
+    const feed = upstreamPowerDbm(splitter.inputCoreLabel);
+    return feed !== null ? calculateOutputPower(feed, splitter.ratio, 0.2) : null;
+  }
+
+  /** Adds a splitter with its own feed core, ratio and auto-generated outputs. */
+  function addExtraSplitter() {
+    const ordinal = form.extraSplitters.length + 2;
+    const ratio: SplitRatio = '1:8';
+    const feedLabel = nextInputCoreLabel(form.cores);
+    const feed = upstreamPowerDbm(feedLabel);
+    const power = feed !== null ? calculateOutputPower(feed, ratio, 0.2) : null;
+    setForm((current) => ({
+      ...current,
+      // Adding a splitter adds its single input strand to the joint.
+      cores: inputCoresForFeeds(current.cores, [
+        ...(current.splitterEnabled ? [current.inputCoreLabel] : []),
+        ...current.extraSplitters.map((item) => item.inputCoreLabel),
+        feedLabel,
+      ]),
+      extraSplitters: [
+        ...current.extraSplitters,
+        {
+          id: `splitter-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+          inputCoreLabel: feedLabel,
+          ratio,
+          outputs: makeExtraOutputs(ratio, power, ordinal),
+        },
+      ],
+    }));
+  }
+
+  function updateExtraSplitter(index: number, patchVal: Partial<ExtraSplitter>) {
+    setForm((current) => ({
+      ...current,
+      extraSplitters: current.extraSplitters.map((item, position) =>
+        position === index ? { ...item, ...patchVal } : item,
+      ),
+    }));
+  }
+
+  function removeExtraSplitter(index: number) {
+    setForm((current) => {
+      const feedLabel = current.extraSplitters[index]?.inputCoreLabel;
+      const remaining = current.extraSplitters.filter((_item, position) => position !== index);
+      // The removed splitter takes its input strand with it.
+      const feeds = [
+        ...(current.splitterEnabled ? [current.inputCoreLabel] : []),
+        ...remaining.map((item) => item.inputCoreLabel),
+      ].filter((label): label is string => Boolean(label));
+      return {
+        ...current,
+        cores: current.splitterEnabled
+          ? inputCoresForFeeds(current.cores, feeds)
+          : current.cores.filter((core) => core.label !== feedLabel),
+        extraSplitters: remaining,
+      };
+    });
+  }
+
+  /** Rebuilds one splitter's outputs from its ratio, dropping hand edits. */
+  function autoGenerateExtraOutputs(index: number) {
+    setForm((current) => {
+      const splitter = current.extraSplitters[index];
+      if (!splitter) return current;
+      const feed = upstreamPowerDbm(splitter.inputCoreLabel);
+      const power = feed !== null ? calculateOutputPower(feed, splitter.ratio, 0.2) : null;
+      return {
+        ...current,
+        extraSplitters: current.extraSplitters.map((item, position) =>
+          position === index
+            ? { ...item, outputs: makeExtraOutputs(item.ratio, power, index + 2) }
+            : item,
+        ),
+      };
+    });
+  }
+
+  function updateExtraOutput(splitterIndex: number, outputIndex: number, patchVal: Partial<Core>) {
+    setForm((current) => ({
+      ...current,
+      extraSplitters: current.extraSplitters.map((item, position) =>
+        position === splitterIndex
+          ? {
+              ...item,
+              outputs: item.outputs.map((core, oi) =>
+                oi === outputIndex ? { ...core, ...patchVal } : core,
+              ),
+            }
+          : item,
+      ),
+    }));
+  }
+
+  function addExtraOutput(splitterIndex: number) {
+    setForm((current) => ({
+      ...current,
+      extraSplitters: current.extraSplitters.map((item, position) => {
+        if (position !== splitterIndex) return item;
+        const next = item.outputs.length + 1;
+        return {
+          ...item,
+          outputs: [
+            ...item.outputs,
+            {
+              label: `S${splitterIndex + 2}-L${String(next).padStart(2, '0')}`,
+              color: tiaCoreColor(next),
+              count: 1,
+              status: 'free' as const,
+              powerDbm: extraOutputPower(item),
+            },
+          ],
+        };
+      }),
+    }));
+  }
+
   async function handleSubmit(event: React.FormEvent) {
     event.preventDefault();
     const lat = Number(form.lat);
@@ -861,7 +1105,42 @@ export function TjFormDialog({
       }
     }
 
+    // One input core per splitter: no core may feed two splitters at once.
+    const splitterFeeds = [
+      ...(form.splitterEnabled ? [form.inputCoreLabel] : []),
+      ...form.extraSplitters.map((extra) => extra.inputCoreLabel),
+    ].filter((label): label is string => Boolean(label));
+    const sharedFeed = splitterFeeds.find(
+      (label, index) => splitterFeeds.indexOf(label) !== index,
+    );
+    if (sharedFeed) {
+      return setError(
+        `Core "${sharedFeed}" feeds more than one splitter. Each splitter needs its own input core.`,
+      );
+    }
+
     const isCut = form.tjType === 'cut' || form.isCut;
+
+    const primarySplitter = {
+      enabled: form.splitterEnabled,
+      ratio: form.splitterEnabled ? form.ratio : null,
+      inputCoreLabel: form.splitterEnabled ? form.inputCoreLabel : null,
+      inputPowerDbm:
+        form.splitterEnabled && inputPowerNum !== null && Number.isFinite(inputPowerNum)
+          ? inputPowerNum
+          : null,
+      lossDb: form.splitterEnabled ? splitterLossDb : null,
+      outputPowerDbm: form.splitterEnabled ? outputPowerDbm : null,
+      powerStatus: form.splitterEnabled ? powerAssessment?.status ?? null : null,
+      outputs: form.splitterEnabled
+        ? form.outputCores.map((core) => ({
+            ...core,
+            count: 1,
+            status: core.status ?? 'free',
+            powerDbm: outputPowerDbm,
+          }))
+        : [],
+    };
 
     const payload: TjInput = {
       code: form.code.trim().toUpperCase(),
@@ -873,7 +1152,12 @@ export function TjFormDialog({
       notes: form.notes.trim() || undefined,
       fibreId: form.fibreId.trim() || undefined,
       inputPowerDbm: inputPowerNum !== null && Number.isFinite(inputPowerNum) ? inputPowerNum : null,
-      cores: form.cores.map((core) => ({
+      // A splitter joint carries one input strand per splitter and nothing else;
+      // a plain joint keeps its own core list.
+      cores: (form.splitterEnabled
+        ? inputCoresForFeeds(form.cores, splitterFeeds)
+        : form.cores
+      ).map((core) => ({
         ...core,
         count: 1,
         status: core.status ?? 'free',
@@ -886,23 +1170,30 @@ export function TjFormDialog({
         status: core.status ?? 'free',
         powerDbm: outputPowerDbm,
       })),
-      splitter: {
-        enabled: form.splitterEnabled,
-        ratio: form.splitterEnabled ? form.ratio : null,
-        inputCoreLabel: form.splitterEnabled ? form.inputCoreLabel : null,
-        inputPowerDbm: form.splitterEnabled && inputPowerNum !== null && Number.isFinite(inputPowerNum) ? inputPowerNum : null,
-        lossDb: form.splitterEnabled ? splitterLossDb : null,
-        outputPowerDbm: form.splitterEnabled ? outputPowerDbm : null,
-        powerStatus: form.splitterEnabled ? powerAssessment?.status ?? null : null,
-        outputs: form.splitterEnabled
-          ? form.outputCores.map((core) => ({
+      splitter: primarySplitter,
+      splitters: [
+        primarySplitter,
+        ...form.extraSplitters.map((extra) => {
+          const feedPower = upstreamPowerDbm(extra.inputCoreLabel);
+          const outPower = extraOutputPower(extra);
+          return {
+            enabled: true,
+            ratio: extra.ratio,
+            inputCoreLabel: extra.inputCoreLabel || null,
+            inputPowerDbm: feedPower,
+            lossDb: getSplitterLossDb(extra.ratio, 0.2),
+            outputPowerDbm: outPower,
+            powerStatus: assessOpticalPower(outPower)?.status ?? null,
+            outputs: extra.outputs.map((core, index) => ({
               ...core,
+              label: core.label.trim() || `S${index + 2}-L${String(index + 1).padStart(2, '0')}`,
               count: 1,
               status: core.status ?? 'free',
-              powerDbm: outputPowerDbm,
-            }))
-          : [],
-      },
+              powerDbm: outPower,
+            })),
+          };
+        }),
+      ],
       userFibres: form.userFibres,
       isCut,
       cutReason: isCut ? form.cutReason.trim() || undefined : undefined,
@@ -1092,18 +1383,22 @@ export function TjFormDialog({
               </span>
             </div>
             <p className="text-[10px] text-muted-foreground leading-relaxed">
-              Define incoming fiber tubes. Input power is filled automatically from the upstream device's output core when this joint is linked — no manual dBm entry. Click the status button to toggle between{' '}
-              <strong className="text-emerald-600 dark:text-emerald-400">Free (Spare)</strong>,{' '}
-              <strong className="text-sky-600 dark:text-sky-400">In Use</strong>, or{' '}
-              <strong className="text-rose-600 dark:text-rose-400">Cut</strong>.
+              Every splitter in this joint owns exactly one input core — its feed strand — so this
+              list has one row per splitter. The input core stays available so the incoming cable
+              can be connected to it. Every branch leaving a splitter is an output core below.
+              Cable tubes are defined in the link editor, not here. Input power is read
+              automatically from the upstream device on the feed core.
             </p>
 
             <CoreEditor
               value={form.cores}
               onChange={handleCoresChange}
               addLabel="Add input core"
-              emptyLabel="Add at least one input core"
-              splitterCoreLabel={form.splitterEnabled ? form.inputCoreLabel : undefined}
+              emptyLabel="No input core"
+              splitterCoreLabel={form.inputCoreLabel}
+              canAdd={false}
+              canRemove={false}
+              canChangeStatus={false}
             />
           </section>
 
@@ -1115,9 +1410,10 @@ export function TjFormDialog({
                   <Split className="size-3.5" />
                 </span>
                 <div>
-                  <p className="text-[12px] font-semibold">Optical Splitter</p>
+                  <p className="text-[12px] font-semibold">Optical Splitter 1</p>
                   <p className="text-[10px] text-muted-foreground">
-                    Connect an input core to a splitter and calculate output power automatically.
+                    One input core and one split ratio; its output legs are generated below and
+                    priced from the feed power.
                   </p>
                 </div>
               </div>
@@ -1132,65 +1428,39 @@ export function TjFormDialog({
                 <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
                   {/* Connect Input Core */}
                   <div className="space-y-1.5">
-                    <Label htmlFor="splitter-feed-core" className="text-[11px]">
-                      Connect Input Core
-                    </Label>
-                    <Select
-                      value={form.inputCoreLabel}
-                      onValueChange={handleSelectSplitterCore}
+                    <Label className="text-[11px]">Splitter input core</Label>
+                    <div
+                      className={cn(
+                        'flex h-9 items-center gap-2 rounded-lg border border-violet-500/30 bg-violet-500/[0.06] px-2',
+                        splitterError && 'border-destructive bg-destructive/5',
+                      )}
                     >
-                      <SelectTrigger
-                        id="splitter-feed-core"
-                        className={cn('h-9', splitterError && 'border-destructive focus:ring-destructive')}
+                      <label
+                        className="relative size-4 shrink-0 cursor-pointer rounded-full border border-white/70 shadow-inner transition hover:scale-110 dark:border-white/20"
+                        style={{ backgroundColor: primaryFeedColor }}
+                        title="Input core colour"
                       >
-                        <SelectValue placeholder="Select feeding core" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {form.cores.map((core, i) => {
-                          const status = core.status ?? 'free';
-                          const isFeeding =
-                            form.splitterEnabled &&
-                            core.label === form.inputCoreLabel &&
-                            !splitterError;
-                          const isDamaged = status === 'damaged';
-                          const isFree = status === 'free';
-
-                          return (
-                            <SelectItem key={`${core.label}-${i}`} value={core.label}>
-                              <div className="flex items-center justify-between gap-3 w-full">
-                                <div className="flex items-center gap-2">
-                                  <span
-                                    className="size-2 rounded-full shrink-0"
-                                    style={{ backgroundColor: core.color }}
-                                  />
-                                  <span className="font-medium">{core.label}</span>
-                                </div>
-                                <span
-                                  className={cn(
-                                    'rounded px-1.5 py-0.5 text-[9.5px] font-semibold',
-                                    isFeeding
-                                      ? 'bg-violet-500/15 text-violet-600 dark:text-violet-400'
-                                      : isFree
-                                        ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400'
-                                        : isDamaged
-                                          ? 'bg-rose-500/15 text-rose-600 dark:text-rose-400'
-                                          : 'bg-amber-500/15 text-amber-600 dark:text-amber-400',
-                                  )}
-                                >
-                                  {isFeeding
-                                    ? '⚡ Splitter Feed'
-                                    : isFree
-                                      ? '🟢 Free'
-                                      : isDamaged
-                                        ? '🔴 Cut'
-                                        : '🔵 In Use (Occupied)'}
-                                </span>
-                              </div>
-                            </SelectItem>
-                          );
-                        })}
-                      </SelectContent>
-                    </Select>
+                        <input
+                          type="color"
+                          value={primaryFeedColor}
+                          onChange={(event) =>
+                            recolourFeed(form.inputCoreLabel, event.target.value)
+                          }
+                          className="absolute inset-0 size-full cursor-pointer opacity-0"
+                          aria-label="Splitter input core colour"
+                        />
+                      </label>
+                      <FeedLabelField
+                        value={form.inputCoreLabel}
+                        onRename={(label) => renameFeed(form.inputCoreLabel, label)}
+                        placeholder="Input core"
+                        ariaLabel="Splitter input core"
+                        className="h-7 min-w-0 flex-1 rounded-md border border-transparent bg-transparent px-0.5 font-mono text-[11.5px] font-semibold outline-none transition focus:border-primary/30 focus:bg-white/70 dark:focus:bg-white/[0.06]"
+                      />
+                      <span className="ml-auto shrink-0 text-[9.5px] text-muted-foreground">
+                        One input per splitter
+                      </span>
+                    </div>
                     {splitterError ? (
                       <div className="anim-rise mt-2 flex items-start gap-2 rounded-xl border border-destructive/30 bg-destructive/10 p-2 text-[11px] text-destructive">
                         <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
@@ -1236,6 +1506,16 @@ export function TjFormDialog({
                         <SelectItem value="90:10">90:10 Coupler (Drop: 10.6 dB)</SelectItem>
                       </SelectContent>
                     </Select>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => autoPopulateSplitterOutputs()}
+                      className="h-7 w-full gap-1 border-primary/30 text-[10.5px] text-primary hover:bg-primary/10"
+                    >
+                      <Sparkles className="size-3" />
+                      Auto-generate {form.ratio} outputs
+                    </Button>
                   </div>
                 </div>
 
@@ -1322,7 +1602,11 @@ export function TjFormDialog({
                   <Cable className="size-3.5" />
                 </span>
                 <div>
-                  <p className="text-[12px] font-semibold">Output Fibre Cores & User Drop Cables</p>
+                  <p className="text-[12px] font-semibold">
+                    {form.splitterEnabled
+                      ? `Splitter 1 (${form.ratio}) Outputs & User Drop Cables`
+                      : 'Output Fibre Cores & User Drop Cables'}
+                  </p>
                   <p className="text-[10px] text-muted-foreground">
                     {form.splitterEnabled
                       ? `Optical Splitter Branches (${form.ratio}) · Auto-calculated ${outputPowerDbm !== null ? `${outputPowerDbm} dBm` : 'dBm'}`
@@ -1735,6 +2019,186 @@ export function TjFormDialog({
               })}
             </div>
           </section>
+
+          {/* ADDITIONAL SPLITTERS — each with its own feed core, ratio and outputs */}
+          <section className="space-y-2 rounded-2xl border border-white/60 bg-white/40 p-3 dark:border-white/10 dark:bg-white/[0.03]">
+            <div className="flex items-center justify-between">
+              <p className="text-[12px] font-semibold">More splitters in this joint</p>
+              <button
+                type="button"
+                onClick={addExtraSplitter}
+                className="inline-flex items-center gap-1 text-[11px] font-semibold text-primary hover:underline"
+              >
+                + Add splitter
+              </button>
+            </div>
+            <p className="text-[10px] leading-relaxed text-muted-foreground">
+              Splitter 1 is configured above. Every splitter added here has one feed core and its own
+              split ratio — outputs are generated from the ratio, so regenerate them any time, or
+              rename and add legs by hand.
+            </p>
+            {form.extraSplitters.length === 0 ? (
+              <p className="text-[10.5px] text-muted-foreground">No extra splitters fitted.</p>
+            ) : null}
+            {form.extraSplitters.map((extra, index) => {
+              const ordinal = index + 2;
+              const feedPower = upstreamPowerDbm(extra.inputCoreLabel);
+              const outPower = extraOutputPower(extra);
+              const loss = getSplitterLossDb(extra.ratio, 0.2);
+              const feedColor =
+                form.cores.find((core) => core.label === extra.inputCoreLabel)?.color ??
+                tiaCoreColor(ordinal);
+              return (
+                <div
+                  key={extra.id}
+                  className="space-y-2 rounded-xl border border-white/60 bg-white/50 p-2.5 dark:border-white/10 dark:bg-white/[0.03]"
+                >
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="rounded-md bg-violet-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-violet-700 dark:text-violet-300">
+                      Splitter {ordinal}
+                    </span>
+                    <span className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-violet-500/30 bg-violet-500/[0.08] px-2">
+                      <label
+                        className="relative size-4 shrink-0 cursor-pointer rounded-full border border-white/70 shadow-inner transition hover:scale-110 dark:border-white/20"
+                        style={{ backgroundColor: feedColor }}
+                        title="Input core colour"
+                      >
+                        <input
+                          type="color"
+                          value={feedColor}
+                          onChange={(event) =>
+                            recolourFeed(extra.inputCoreLabel, event.target.value)
+                          }
+                          className="absolute inset-0 size-full cursor-pointer opacity-0"
+                          aria-label={`Splitter ${ordinal} input core colour`}
+                        />
+                      </label>
+                      <FeedLabelField
+                        ariaLabel={`Splitter ${ordinal} input core`}
+                        value={extra.inputCoreLabel}
+                        onRename={(label) => renameFeed(extra.inputCoreLabel, label)}
+                        placeholder="Input core"
+                        className="h-6 w-[104px] rounded-md border border-transparent bg-transparent px-0.5 font-mono text-[11px] font-semibold outline-none transition focus:border-primary/40 focus:bg-background"
+                      />
+                    </span>
+                    <Select
+                      value={extra.ratio}
+                      onValueChange={(value) => {
+                        const ratio = value as SplitRatio;
+                        const feed = upstreamPowerDbm(extra.inputCoreLabel);
+                        const power = feed !== null ? calculateOutputPower(feed, ratio, 0.2) : null;
+                        updateExtraSplitter(index, {
+                          ratio,
+                          outputs: makeExtraOutputs(ratio, power, ordinal),
+                        });
+                      }}
+                    >
+                      <SelectTrigger
+                        aria-label={`Splitter ${ordinal} ratio`}
+                        className="h-8 w-[104px] font-mono text-[11px]"
+                      >
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {RATIO_OPTIONS.map((option) => (
+                          <SelectItem key={`s${ordinal}-${option}`} value={option}>
+                            {option}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => autoGenerateExtraOutputs(index)}
+                      className="h-8 gap-1 px-2 text-[10.5px]"
+                    >
+                      <Wand2 className="size-3" />
+                      Auto generate
+                    </Button>
+                    <span className="font-mono text-[10px] text-muted-foreground">
+                      -{loss.toFixed(1)} dB ·{' '}
+                      {feedPower !== null ? `${feedPower} dBm in` : 'no feed power'} ·{' '}
+                      {outPower !== null ? `${outPower} dBm out` : '—'}
+                    </span>
+                    <button
+                      type="button"
+                      aria-label={`Remove splitter ${ordinal}`}
+                      onClick={() => removeExtraSplitter(index)}
+                      className="ml-auto text-[11px] text-muted-foreground hover:text-destructive"
+                    >
+                      Remove
+                    </button>
+                  </div>
+
+                  <div className="grid gap-1.5 sm:grid-cols-2">
+                    {extra.outputs.map((out, outIndex) => (
+                      <div key={`${extra.id}-out-${outIndex}`} className="flex items-center gap-1.5">
+                        <label
+                          className="relative size-6 shrink-0 cursor-pointer rounded-lg border border-white/70 shadow-inner transition hover:scale-105 active:scale-95 dark:border-white/20"
+                          style={{ backgroundColor: out.color }}
+                          title="Output core colour"
+                        >
+                          <input
+                            type="color"
+                            value={out.color}
+                            onChange={(event) =>
+                              updateExtraOutput(index, outIndex, { color: event.target.value })
+                            }
+                            className="absolute inset-0 size-full cursor-pointer opacity-0"
+                            aria-label={`Splitter ${ordinal} output ${outIndex + 1} colour`}
+                          />
+                        </label>
+                        <Input
+                          aria-label={`Splitter ${ordinal} output ${outIndex + 1}`}
+                          value={out.label}
+                          onChange={(event) =>
+                            updateExtraOutput(index, outIndex, { label: event.target.value })
+                          }
+                          className="h-7 font-mono text-[10.5px]"
+                        />
+                        <button
+                          type="button"
+                          aria-label={`Remove splitter ${ordinal} output ${outIndex + 1}`}
+                          onClick={() =>
+                            updateExtraSplitter(index, {
+                              outputs: extra.outputs.filter((_core, oi) => oi !== outIndex),
+                            })
+                          }
+                          className="text-[11px] text-muted-foreground hover:text-destructive"
+                        >
+                          ×
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => addExtraOutput(index)}
+                      className="text-[10.5px] font-semibold text-primary hover:underline"
+                    >
+                      + Add output
+                    </button>
+                    <span className="text-[10px] text-muted-foreground">
+                      {extra.outputs.length} output{extra.outputs.length === 1 ? '' : 's'} on{' '}
+                      {extra.ratio}
+                    </span>
+                  </div>
+                </div>
+              );
+            })}
+          </section>
+
+            {initial ? (
+              <FibreCorePicker
+                kind="tj"
+                deviceId={initial.id}
+                links={links}
+                onPatched={onLinksChanged}
+              />
+            ) : null}
             </>
           ) : null}
 

@@ -2,6 +2,8 @@
 
 import { cn } from '@/lib/utils';
 import type { DeviceKind, FibreLink } from '@/lib/types';
+import { coreInTubeOf, tiaCoreName, tubeCoreLabel, tubeOf } from '@/lib/fibre-cores';
+import { CoreDot } from './core-dot';
 
 /** A core/port of the current device and the device patched to its far end. */
 export interface CorePatch {
@@ -9,6 +11,12 @@ export interface CorePatch {
   kind: DeviceKind;
   code: string;
   coreLabel: string | null;
+  /** 1-based position of this strand on the cable, used for its tube/core info. */
+  coreIndex: number;
+  /** Colour of this end's core, from the link's colour code. */
+  color: string | null;
+  /** Colour of the far end's core. */
+  farColor: string | null;
 }
 
 /**
@@ -37,14 +45,21 @@ export function linkPatches(
           : link.toOnuId === endpoint.id;
     if (!fromHere && !toHere) return;
 
-    link.cores.forEach((core) => {
+    link.cores.forEach((core, position) => {
       const localLabel = fromHere ? core.fromCoreLabel : core.toCoreLabel;
       if (!localLabel || patches.has(localLabel)) return;
+      const farLabel = fromHere ? core.toCoreLabel : core.fromCoreLabel;
       patches.set(localLabel, {
         link,
         kind: fromHere ? link.toKind : link.fromKind,
         code: fromHere ? link.toCode : link.fromCode,
-        coreLabel: fromHere ? core.toCoreLabel : core.fromCoreLabel,
+        coreLabel: farLabel,
+        coreIndex: Number(core.index) || position + 1,
+        color: core.color ?? null,
+        farColor:
+          (farLabel
+            ? link.cores.find((item) => item.label === farLabel)?.color
+            : null) ?? null,
       });
     });
   });
@@ -62,10 +77,13 @@ export function CorePatchLine({
   localCore: string;
   patch: CorePatch;
 }) {
+  const tube = tubeOf(patch.coreIndex);
+  const coreInTube = coreInTubeOf(patch.coreIndex);
+  const strandName = tiaCoreName(patch.coreIndex);
   return (
     <div
-      className="mt-1.5 flex items-center gap-1.5 border-t border-border/40 pt-1.5 font-mono text-[9.5px]"
-      title={`${localCode} ${localCore} → ${patch.code} ${patch.coreLabel ?? 'unpatched'} · fibre ${patch.link.fibreId}`}
+      className="mt-1.5 flex flex-wrap items-center gap-1.5 border-t border-border/40 pt-1.5 font-mono text-[9.5px]"
+      title={`${localCode} ${localCore} → ${patch.code} ${patch.coreLabel ?? 'unpatched'} · cable strand ${tubeCoreLabel(patch.coreIndex)} (tube ${tube}, core ${coreInTube}, ${strandName}) · fibre ${patch.link.fibreId}`}
     >
       <span
         className={cn(
@@ -79,12 +97,24 @@ export function CorePatchLine({
       >
         {patch.kind === 'olt' ? 'OLT' : patch.kind === 'onu' ? 'ONU' : 'TJ'}
       </span>
-      <span className="min-w-0 flex-1 truncate">
+      <span className="flex min-w-0 flex-1 items-center gap-1 truncate">
         <span className="font-semibold">{localCode}</span>
-        <span className="text-muted-foreground"> · {localCore}</span>
-        <span className="mx-1 text-muted-foreground">→</span>
+        <span className="inline-flex items-center gap-1 text-muted-foreground">
+          · <CoreDot color={patch.color} className="size-2" /> {localCore}
+        </span>
+        <span className="mx-0.5 text-muted-foreground">→</span>
         <span className="font-semibold">{patch.code}</span>
-        <span className="text-muted-foreground"> · {patch.coreLabel ?? 'unpatched'}</span>
+        <span className="inline-flex min-w-0 items-center gap-1 text-muted-foreground">
+          ·{' '}
+          {patch.coreLabel ? (
+            <>
+              <CoreDot color={patch.farColor} className="size-2" />
+              <span className="truncate">{patch.coreLabel}</span>
+            </>
+          ) : (
+            <span className="truncate">unpatched</span>
+          )}
+        </span>
       </span>
       {patch.link.status === 'cut' ? (
         <span className="shrink-0 rounded bg-rose-500/15 px-1 py-0.5 text-[8px] font-semibold uppercase text-rose-600 dark:text-rose-300">
@@ -92,6 +122,13 @@ export function CorePatchLine({
         </span>
       ) : null}
       <span className="shrink-0 text-[8.5px] text-muted-foreground">{patch.link.fibreId}</span>
+      <span
+        className="inline-flex shrink-0 items-center gap-1 rounded bg-muted/70 px-1 py-0.5 text-[8.5px] font-semibold text-foreground/80"
+        title={`Tube ${tube} · core ${coreInTube} · ${strandName}`}
+      >
+        <CoreDot color={patch.color} className="size-2" />
+        {tubeCoreLabel(patch.coreIndex)}
+      </span>
     </div>
   );
 }

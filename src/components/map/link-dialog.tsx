@@ -1,7 +1,7 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
-import { ArrowRight, Cable, Loader2, Route, Ruler, Trash2, TriangleAlert } from 'lucide-react';
+import { useEffect, useMemo, useState, Fragment } from 'react';
+import { ArrowRight, Cable, Loader2, Plus, Ruler, Trash2, TriangleAlert } from 'lucide-react';
 import { toast } from 'sonner';
 import {
   Dialog,
@@ -39,27 +39,26 @@ import type {
 } from '@/lib/types';
 import { formatDistance } from '@/lib/utils';
 import { routeLengthMeters } from '@/lib/route';
+import { splitterFeedLabels, tjCoreUnavailable } from '@/lib/device-ports';
+import {
+  CORES_PER_TUBE,
+  plainCoreLabel,
+  tiaCoreColor,
+  tubeCoreHint,
+  tubeCoreLabel,
+  tubeOf,
+  type FibreCableType,
+} from '@/lib/fibre-cores';
 
-const CORE_COLORS = [
-  '#22d3ee',
-  '#a78bfa',
-  '#f472b6',
-  '#fbbf24',
-  '#34d399',
-  '#60a5fa',
-  '#fb7185',
-  '#c084fc',
-  '#4ade80',
-  '#facc15',
-  '#38bdf8',
-  '#f97316',
-];
+const CORE_COLORS = Array.from({ length: 12 }, (_item, index) => tiaCoreColor(index + 1));
 
 interface CoreRow {
   label: string;
   color: string;
   fromCore: string;
   toCore: string;
+  /** Extra loss this strand carries (dB); set from a device's core picker. */
+  lossDb: number;
 }
 
 interface CoreOption {
@@ -78,12 +77,27 @@ function keyOf(ref: LinkDeviceRef | null | undefined): string {
   return ref ? `${ref.kind}:${ref.id}` : '';
 }
 
-function makeRows(count: number, existing: CoreRow[] = []): CoreRow[] {
+/** Default strand label for a cable construction and 1-based core number. */
+function labelFor(type: FibreCableType, coreNumber: number): string {
+  return type === 'core' ? plainCoreLabel(coreNumber) : tubeCoreLabel(coreNumber);
+}
+
+/** Existing links carry their construction in their strand labels. */
+function inferFibreType(link: FibreLink): FibreCableType {
+  return link.cores.some((core) => /^T\d+-\d+$/i.test(core.label.trim())) ? 'tube' : 'core';
+}
+
+function makeRows(
+  count: number,
+  existing: CoreRow[] = [],
+  type: FibreCableType = 'tube',
+): CoreRow[] {
   return Array.from({ length: Math.max(0, Math.min(count, 288)) }, (_value, index) => ({
-    label: existing[index]?.label ?? `Core ${index + 1}`,
+    label: existing[index]?.label ?? labelFor(type, index + 1),
     color: existing[index]?.color ?? CORE_COLORS[index % CORE_COLORS.length],
     fromCore: existing[index]?.fromCore ?? '',
     toCore: existing[index]?.toCore ?? '',
+    lossDb: Number(existing[index]?.lossDb ?? 0),
   }));
 }
 
@@ -96,13 +110,17 @@ interface LinkDialogProps {
   links: FibreLink[];
   from: LinkDeviceRef | null;
   to: LinkDeviceRef | null;
+  /** Ports already picked on the map connection tool, applied to the first core. */
+  fromPort?: string | null;
+  toPort?: string | null;
+  /** Route bends drawn on the map before the form opened. */
+  initialPath?: LinkPathPoint[] | null;
+  /** Construction picked before the map picks; ignored when editing a link. */
+  fibreType?: FibreCableType;
   link?: FibreLink | null;
   /** Drawn duct waypoints, owned by the workspace so the map can render them. */
   path: LinkPathPoint[];
   onPathChange: (path: LinkPathPoint[]) => void;
-  onStartDraw: () => void;
-  /** True while the user is drawing on the map; the form is kept mounted but hidden. */
-  drawing?: boolean;
   onSaved: (link: FibreLink, mode: 'create' | 'update') => void;
   onRequestDelete?: (link: FibreLink) => void;
 }
@@ -116,15 +134,19 @@ export function LinkDialog({
   links,
   from,
   to,
+  fromPort = null,
+  toPort = null,
+  initialPath = null,
+  fibreType = 'tube',
   link,
   path,
   onPathChange,
-  onStartDraw,
-  drawing = false,
   onSaved,
   onRequestDelete,
 }: LinkDialogProps) {
   const editing = Boolean(link);
+  // A link's own strands decide its construction; a new one uses the picked type.
+  const type: FibreCableType = link ? inferFibreType(link) : fibreType;
   const [fromKey, setFromKey] = useState('');
   const [toKey, setToKey] = useState('');
   const [fibreId, setFibreId] = useState('');
@@ -168,12 +190,13 @@ export function LinkDialog({
       setRows(
         link.cores.length > 0
           ? link.cores.map((core, index) => ({
-              label: core.label || `Core ${index + 1}`,
+              label: core.label || labelFor(type, index + 1),
               color: core.color ?? CORE_COLORS[index % CORE_COLORS.length],
               fromCore: core.fromCoreLabel ?? '',
               toCore: core.toCoreLabel ?? '',
+              lossDb: Number(core.lossDb ?? 0),
             }))
-          : makeRows(link.coreCount),
+          : makeRows(link.coreCount, [], type),
       );
       return;
     }
@@ -181,24 +204,29 @@ export function LinkDialog({
     setFromKey(keyOf(from));
     setToKey(keyOf(to));
     setFibreId('');
-    setCoreCount('4');
+    setCoreCount(String(CORES_PER_TUBE));
     setAttenuation('0.35');
     setSpliceCount('2');
     setConnectionLoss('1');
     setColor(null);
-    setRows(makeRows(4));
+    // Both constructions start with 12 strands; a multi-tube cable forms the
+    // first tube, a standard cable numbers its cores straight through. Ports
+    // chosen in the map connection tool land on the first strand.
+    const fresh = makeRows(CORES_PER_TUBE, [], type);
+    fresh[0] = { ...fresh[0], fromCore: fromPort ?? '', toCore: toPort ?? '' };
+    setRows(fresh);
     setStatus('active');
     setNotes('');
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, link, from, to]);
+  }, [open, link, from, to, fromPort, toPort, fibreType]);
 
   // The route belongs to the link, not to the device pickers: load it when the
   // dialog opens for a link and never while the user is drawing on the map.
   useEffect(() => {
     if (!open) return;
-    onPathChange(link?.path ?? []);
+    onPathChange(link?.path ?? initialPath ?? []);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, link]);
+  }, [open, link, initialPath]);
 
   const fromPoint = useMemo(
     () => devicePoint(fromKey, tjs, olts, onus),
@@ -228,8 +256,6 @@ export function LinkDialog({
     [rawFromOptions, rows],
   );
   const toOptions = useMemo(() => markAssigned(rawToOptions, rows, 'toCore'), [rawToOptions, rows]);
-  const freeFromOptions = useMemo(() => fromOptions.filter((o) => !o.used), [fromOptions]);
-  const freeToOptions = useMemo(() => toOptions.filter((o) => !o.used), [toOptions]);
 
   const fromInfo = useMemo(
     () => deviceInfo(fromKey, tjs, olts, onus, links),
@@ -243,6 +269,9 @@ export function LinkDialog({
   const connectedCount = rows.filter((row) => row.fromCore && row.toCore).length;
   const fromCode = deviceLabel(fromKey, tjs, olts, onus) ?? 'From device';
   const toCode = deviceLabel(toKey, tjs, olts, onus) ?? 'To device';
+  // Bare device codes for the core table, where the kind is already implied.
+  const fromCodeShort = deviceCode(fromKey, tjs, olts, onus) ?? 'from device';
+  const toCodeShort = deviceCode(toKey, tjs, olts, onus) ?? 'to device';
 
   function pickFreeFrom(label: string) {
     setRows((current) => {
@@ -264,7 +293,75 @@ export function LinkDialog({
     setCoreCount(value);
     const count = Number(value);
     if (!Number.isFinite(count) || count < 0) return;
-    setRows((current) => makeRows(Math.round(count), current));
+    setRows((current) => makeRows(Math.round(count), current, type));
+  }
+
+  /** Appends a single strand to a standard core cable. */
+  function addCore() {
+    setRows((current) => {
+      if (current.length >= 288) return current;
+      const index = current.length;
+      const next = [
+        ...current,
+        {
+          label: labelFor(type, index + 1),
+          color: CORE_COLORS[index % CORE_COLORS.length],
+          fromCore: '',
+          toCore: '',
+          lossDb: 0,
+        },
+      ];
+      setCoreCount(String(next.length));
+      return next;
+    });
+  }
+
+  /**
+   * Drops one strand and renumbers the plain-core labels after it, leaving any
+   * custom strand names untouched.
+   */
+  function removeCore(removeIndex: number) {
+    setRows((current) => {
+      const next = current
+        .filter((_row, index) => index !== removeIndex)
+        .map((row, index) =>
+          /^(Core \d+|T\d+-\d+)$/i.test(row.label.trim())
+            ? { ...row, label: labelFor(type, index + 1) }
+            : row,
+        );
+      setCoreCount(String(next.length));
+      return next;
+    });
+  }
+
+  /**
+   * Appends one whole tube: 12 more TIA-coloured rows numbered from 01 inside
+   * the new tube, so a multi-tube cable keeps restarting every 12 cores.
+   */
+  function addTube() {
+    setRows((current) => {
+      const next = makeRows(current.length + CORES_PER_TUBE, current, type);
+      setCoreCount(String(next.length));
+      return next;
+    });
+  }
+
+  /**
+   * Drops one whole tube (12 rows) and renumbers the rows after it, so the tube
+   * headers and TIA colours stay aligned with the new core count.
+   */
+  function removeTube(startIndex: number) {
+    setRows((current) => {
+      const next = current
+        .filter((_row, index) => index < startIndex || index >= startIndex + CORES_PER_TUBE)
+        .map((row, index) =>
+          index >= startIndex
+            ? { ...row, label: labelFor(type, index + 1), color: tiaCoreColor(index + 1) }
+            : row,
+        );
+      setCoreCount(String(next.length));
+      return next;
+    });
   }
 
   function updateRow(index: number, patch: Partial<CoreRow>) {
@@ -274,6 +371,8 @@ export function LinkDialog({
   async function handleSubmit(event: React.FormEvent) {
     event.preventDefault();
     if (!fibreId.trim()) return setError('A fibre ID is required to identify this cable.');
+    if (fibreId.length < 1) return setError('Fibre ID must be at least 1 character.');
+    if (fibreId.length > 60) return setError('Fibre ID must be at most 60 characters.');
     const fromParts = splitKey(fromKey);
     const toParts = splitKey(toKey);
     if (!fromParts || !toParts) return setError('Pick the device at each end of the fibre.');
@@ -286,10 +385,11 @@ export function LinkDialog({
 
     const cores = rows.map((row, index) => ({
       index: index + 1,
-      label: row.label.trim() || `Core ${index + 1}`,
+      label: row.label.trim() || labelFor(type, index + 1),
       color: row.color,
       fromCoreLabel: row.fromCore || null,
       toCoreLabel: row.toCore || null,
+      lossDb: Number.isFinite(row.lossDb) ? Math.min(Math.max(row.lossDb, 0), 99) : 0,
     }));
 
     const payload = {
@@ -340,24 +440,16 @@ export function LinkDialog({
   }
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange} modal={!drawing}>
-      <DialogContent
-        hideOverlay={drawing}
-        className={
-          drawing
-            ? 'hidden'
-            : 'max-h-[92vh] w-[calc(100vw-2rem)] max-w-[calc(100vw-2rem)] overflow-y-auto overflow-x-hidden sm:max-w-4xl'
-        }
-        onPointerDownOutside={drawing ? (event) => event.preventDefault() : undefined}
-        onFocusOutside={drawing ? (event) => event.preventDefault() : undefined}
-        onEscapeKeyDown={drawing ? (event) => event.preventDefault() : undefined}
-      >
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-h-[92vh] w-[calc(100vw-2rem)] max-w-[calc(100vw-2rem)] overflow-y-auto overflow-x-hidden sm:max-w-4xl">
         <DialogHeader>
           <DialogTitle>{editing ? `Link ${link?.fibreId}` : 'Add link'}</DialogTitle>
           <DialogDescription>
             {editing
               ? 'Inspect this fibre and map its cores to the devices at each end.'
-              : 'Connect any two devices — terminal joints, OLT cabinets or subscriber ONUs. Choose how many cores the cable has; each core gets a name, colour and connection state.'}
+              : type === 'core'
+                ? 'Connect any two devices — terminal joints, OLT cabinets or subscriber ONUs. This cable starts with 12 standard cores; add or delete strands and give each core a name, colour and connection state.'
+                : 'Connect any two devices — terminal joints, OLT cabinets or subscriber ONUs. This cable starts with one 12-core tube in the TIA colour code; add whole tubes and give each core a name, colour and connection state.'}
           </DialogDescription>
         </DialogHeader>
 
@@ -387,33 +479,13 @@ export function LinkDialog({
           </span>
           <span className="inline-flex items-center gap-1 text-[11px] text-muted-foreground">
             <Cable className="size-3" />
-            {rows.length} cores · {connectedCount} connected
+            {rows.length} cores
+            {type === 'tube'
+              ? ` · ${tubeOf(rows.length)} tube${tubeOf(rows.length) === 1 ? '' : 's'}`
+              : ' · standard core cable'}
+            {' · '}
+            {connectedCount} connected
           </span>
-        </div>
-
-        <div className="flex flex-wrap items-center justify-between gap-2 rounded-2xl border border-dashed border-primary/30 bg-primary/[0.04] px-3 py-2.5">
-          <div className="min-w-0">
-            <p className="flex items-center gap-1.5 text-[12px] font-semibold">
-              <Route className="size-3.5 text-primary" />
-              Cable route
-            </p>
-            <p className="mt-0.5 text-[10px] text-muted-foreground">
-              {path.length > 0
-                ? `${path.length} drawn bend${path.length === 1 ? '' : 's'} · ${formatDistance(distance)} along the duct`
-                : 'Draw the duct path like a Google Maps line — click the map to add bends, drag a point to adjust one, double-click to finish.'}
-            </p>
-          </div>
-          <div className="flex shrink-0 items-center gap-2">
-            {path.length > 0 ? (
-              <Button type="button" size="sm" variant="ghost" onClick={() => onPathChange([])}>
-                Clear route
-              </Button>
-            ) : null}
-            <Button type="button" size="sm" variant="outline" onClick={onStartDraw}>
-              <Route className="size-3.5" />
-              {path.length > 0 ? 'Redraw on map' : 'Draw on map'}
-            </Button>
-          </div>
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-4">
@@ -461,7 +533,7 @@ export function LinkDialog({
               {fromInfo ? (
                 <DeviceInfoCard
                   info={fromInfo}
-                  free={freeFromOptions}
+                  options={fromOptions}
                   side="from"
                   onPick={pickFreeFrom}
                 />
@@ -508,7 +580,7 @@ export function LinkDialog({
                 </SelectContent>
               </Select>
               {toInfo ? (
-                <DeviceInfoCard info={toInfo} free={freeToOptions} side="to" onPick={pickFreeTo} />
+                <DeviceInfoCard info={toInfo} options={toOptions} side="to" onPick={pickFreeTo} />
               ) : null}
             </div>
           </div>
@@ -541,7 +613,7 @@ export function LinkDialog({
 
           <section className="rounded-xl border border-amber-500/25 bg-amber-500/[0.04] p-3">
             <div className="mb-2">
-              <p className="text-[12px] font-semibold">Optical span parameters</p>
+              <p className="text-[12px] font-semibold">Optical link parameters</p>
               <p className="text-[10px] text-muted-foreground">
                 Used to compute the power budget from OLT to ONU: {formatDistance(distance)} of fibre at{' '}
                 {attenuation || '0'} dB/km, {spliceCount || '0'} splice(s) at 0.1 dB each and{' '}
@@ -597,18 +669,70 @@ export function LinkDialog({
                 <p className="text-[10px] text-muted-foreground">
                   {connectedCount} connected · {rows.length - connectedCount} free · a core connects
                   when both ends are mapped
+                  {type === 'tube'
+                    ? ` · ${tubeOf(rows.length)} tube${tubeOf(rows.length) === 1 ? '' : 's'} of ${CORES_PER_TUBE}`
+                    : ` · ${rows.length} standard core${rows.length === 1 ? '' : 's'}`}
                 </p>
               </div>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                onClick={type === 'core' ? addCore : addTube}
+                className="h-7 shrink-0 gap-1 px-2 text-[10.5px]"
+                title={
+                  type === 'core'
+                    ? 'Append one more core to this cable'
+                    : `Append a ${CORES_PER_TUBE}-core tube with TIA colours restarting at Blue`
+                }
+              >
+                <Plus className="size-3" />
+                {type === 'core' ? 'Add core' : `Add tube (${CORES_PER_TUBE} cores)`}
+              </Button>
             </div>
 
             <div className="max-h-64 space-y-1.5 overflow-y-auto pr-1">
+              {rows.length > 0 ? (
+                <div className="grid grid-cols-[auto_minmax(0,1fr)_1fr_1fr_auto_auto] items-center gap-2 px-2 pb-0.5 text-[8.5px] font-semibold uppercase tracking-[0.1em] text-muted-foreground">
+                  <span aria-hidden />
+                  <span>{type === 'core' ? 'Core' : 'Core · tube'}</span>
+                  <span className="truncate" title={`Cores patched at ${fromCode}`}>
+                    From · {fromCodeShort}
+                  </span>
+                  <span className="truncate" title={`Cores patched at ${toCode}`}>
+                    To · {toCodeShort}
+                  </span>
+                  <span className="text-right">State</span>
+                  <span aria-hidden className="size-5" />
+                </div>
+              ) : null}
               {rows.map((row, index) => {
                 const connected = Boolean(row.fromCore && row.toCore);
                 return (
-                  <div
-                    key={index}
-                    className="grid grid-cols-[auto_minmax(0,1fr)_1fr_1fr_auto] items-center gap-2 rounded-lg border border-white/50 bg-white/50 px-2 py-1.5 dark:border-white/[0.06] dark:bg-white/[0.02]"
-                  >
+                  <Fragment key={index}>
+                  {type === 'tube' && index % CORES_PER_TUBE === 0 ? (
+                    <div className="flex items-center gap-2 pt-0.5 text-[9px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
+                      <span>Tube {tubeOf(index + 1)}</span>
+                      <span className="font-mono text-[8.5px] normal-case tracking-normal">
+                        T{tubeOf(index + 1)}-01 →{' '}
+                        {tubeCoreLabel(index + Math.min(CORES_PER_TUBE, rows.length - index))}
+                      </span>
+                      <span className="h-px flex-1 bg-border/60" />
+                      <span>
+                        {Math.min(CORES_PER_TUBE, rows.length - index)}/{CORES_PER_TUBE} cores
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => removeTube(index)}
+                        title={`Delete tube ${tubeOf(index + 1)} and its cores`}
+                        aria-label={`Delete tube ${tubeOf(index + 1)}`}
+                        className="grid size-5 shrink-0 place-items-center rounded-md text-muted-foreground/70 transition hover:bg-destructive/10 hover:text-destructive active:scale-90"
+                      >
+                        <Trash2 className="size-3" />
+                      </button>
+                    </div>
+                  ) : null}
+                  <div className="grid grid-cols-[auto_minmax(0,1fr)_1fr_1fr_auto_auto] items-center gap-2 rounded-lg border border-white/50 bg-white/50 px-2 py-1.5 dark:border-white/[0.06] dark:bg-white/[0.02]">
                     <label
                       className="relative size-4 shrink-0 cursor-pointer rounded-full border border-white/70 shadow-inner transition hover:scale-110 dark:border-white/20"
                       style={{ backgroundColor: row.color }}
@@ -626,7 +750,8 @@ export function LinkDialog({
                       value={row.label}
                       onChange={(event) => updateRow(index, { label: event.target.value })}
                       aria-label={`Core ${index + 1} name`}
-                      placeholder={`Core ${index + 1}`}
+                      placeholder={labelFor(type, index + 1)}
+                      title={`${type === 'core' ? `Core ${index + 1}` : tubeCoreHint(index + 1)} — ${row.fromCore ? `from ${fromCode} ${row.fromCore}` : 'not connected at the from end'}, ${row.toCore ? `to ${toCode} ${row.toCore}` : 'not connected at the to end'}`}
                       className="h-8 min-w-0 rounded-md border border-transparent bg-transparent px-1.5 font-mono text-[10.5px] font-semibold outline-none transition focus:border-primary/40 focus:bg-background"
                     />
                     <Select
@@ -692,12 +817,28 @@ export function LinkDialog({
                     >
                       {connected ? 'Connected' : 'Free'}
                     </span>
+                    {type === 'core' ? (
+                      <button
+                        type="button"
+                        onClick={() => removeCore(index)}
+                        title={`Delete ${row.label || `core ${index + 1}`} from this cable`}
+                        aria-label={`Delete ${row.label || `core ${index + 1}`}`}
+                        className="grid size-5 shrink-0 place-items-center rounded-md text-muted-foreground/70 transition hover:bg-destructive/10 hover:text-destructive active:scale-90"
+                      >
+                        <Trash2 className="size-3" />
+                      </button>
+                    ) : (
+                      <span className="size-5" />
+                    )}
                   </div>
+                  </Fragment>
                 );
               })}
               {rows.length === 0 ? (
                 <p className="rounded-lg border border-dashed border-border px-3 py-4 text-center text-[11px] text-muted-foreground">
-                  Set a core count above to generate cores.
+                  {type === 'core'
+                    ? 'Add cores with the button above, or set a core count.'
+                    : 'Add a tube with the button above to generate cores.'}
                 </p>
               ) : null}
             </div>
@@ -860,7 +1001,8 @@ function deviceInfo(
     const tj = tjs.find((item) => item.id === parts.id);
     if (!tj) return null;
     const cores = [...(tj.cores ?? []), ...(tj.outputCores ?? [])];
-    const used = cores.filter((c) => c.status === 'in_use').length;
+    const feeds = splitterFeedLabels(tj);
+    const used = cores.filter((core) => tjCoreUnavailable(core, feeds)).length;
     const area = [tj.districtName, tj.areaName].filter(Boolean).join(' · ') || null;
     return {
       kind: 'tj',
@@ -899,12 +1041,13 @@ function deviceInfo(
 
 function DeviceInfoCard({
   info,
-  free,
+  options,
   side,
   onPick,
 }: {
   info: DeviceInfo;
-  free: CoreOption[];
+  /** Every port of the device, free and occupied, so nothing is hidden. */
+  options: CoreOption[];
   side: 'from' | 'to';
   onPick: (label: string) => void;
 }) {
@@ -938,22 +1081,33 @@ function DeviceInfoCard({
       </div>
       <div className="mt-2">
         <p className="mb-1 text-[9.5px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">
-          Free ports/cores {side === 'from' ? '(from)' : '(to)'} — select to assign
+          Ports/cores {side === 'from' ? '(from)' : '(to)'} — free selectable · in use listed
         </p>
-        {free.length > 0 ? (
+        {options.length > 0 ? (
           <div className="flex max-h-24 flex-wrap gap-1 overflow-y-auto pr-1">
-            {free.map((opt) => (
-              <button
-                key={opt.label}
-                type="button"
-                onClick={() => onPick(opt.label)}
-                className="inline-flex items-center gap-1 rounded-md border border-emerald-500/30 bg-emerald-500/10 px-2 py-1 text-[10px] font-medium text-emerald-700 transition hover:bg-emerald-500/20 dark:text-emerald-300"
-                title={`${opt.label} · ${opt.hint}`}
-              >
-                {opt.label}
-                <span className="text-[9px] text-muted-foreground">{opt.hint}</span>
-              </button>
-            ))}
+            {options.map((opt) =>
+              opt.used ? (
+                <span
+                  key={opt.label}
+                  className="inline-flex cursor-not-allowed items-center gap-1 rounded-md border border-rose-500/25 bg-rose-500/10 px-2 py-1 text-[10px] font-medium text-rose-600 opacity-70 dark:text-rose-300"
+                  title={`${opt.label} · ${opt.hint} · in use`}
+                >
+                  {opt.label}
+                  <span className="text-[9px]">in use</span>
+                </span>
+              ) : (
+                <button
+                  key={opt.label}
+                  type="button"
+                  onClick={() => onPick(opt.label)}
+                  className="inline-flex items-center gap-1 rounded-md border border-emerald-500/30 bg-emerald-500/10 px-2 py-1 text-[10px] font-medium text-emerald-700 transition hover:bg-emerald-500/20 dark:text-emerald-300"
+                  title={`${opt.label} · ${opt.hint}`}
+                >
+                  {opt.label}
+                  <span className="text-[9px] text-muted-foreground">{opt.hint}</span>
+                </button>
+              ),
+            )}
           </div>
         ) : (
           <p className="text-[10px] text-muted-foreground">No free ports/cores available on this device.</p>
@@ -998,6 +1152,14 @@ function deviceLabel(key: string, tjs: Tj[], olts: Olt[], onus: Onu[]): string |
   return olt ? `OLT · ${olt.code}` : null;
 }
 
+function deviceCode(key: string, tjs: Tj[], olts: Olt[], onus: Onu[]): string | null {
+  const parts = splitKey(key);
+  if (!parts) return null;
+  if (parts.kind === 'tj') return tjs.find((item) => item.id === parts.id)?.code ?? null;
+  if (parts.kind === 'onu') return onus.find((item) => item.id === parts.id)?.username ?? null;
+  return olts.find((item) => item.id === parts.id)?.code ?? null;
+}
+
 function markAssigned(
   options: CoreOption[],
   rows: CoreRow[],
@@ -1033,15 +1195,38 @@ function coreOptions(
     if (!tj) return [];
     const seen = new Set<string>();
     const options: CoreOption[] = [];
-    [...(tj.cores ?? []), ...(tj.outputCores ?? [])].forEach((core) => {
-      if (!core.label || seen.has(core.label)) return;
-      seen.add(core.label);
-      options.push({
-        label: core.label,
-        hint: core.status === 'in_use' ? 'core' : 'core',
-        used: core.status === 'in_use',
+    const push = (label: string, hint: string, used: boolean) => {
+      if (!label || seen.has(label)) return;
+      seen.add(label);
+      options.push({ label, hint, used });
+    };
+
+    const feeds = splitterFeedLabels(tj);
+    (tj.cores ?? []).forEach((core) => {
+      push(
+        core.label,
+        feeds.has(core.label) ? 'splitter input' : 'core',
+        tjCoreUnavailable(core, feeds),
+      );
+    });
+    feeds.forEach((label) => push(label, 'splitter input', false));
+
+    // A joint can carry several splitters; every leg is connectable, labelled with
+    // the splitter it belongs to so parallel splitters stay distinguishable.
+    const splitters = tj.splitters?.length ? tj.splitters : tj.splitter ? [tj.splitter] : [];
+    splitters.forEach((splitter, index) => {
+      if (!splitter?.enabled) return;
+      const hint = `splitter ${index + 1}${splitter.ratio ? ` · ${splitter.ratio}` : ''}`;
+      (splitter.outputs ?? []).forEach((core) => {
+        push(core.label, hint, core.status === 'in_use');
       });
     });
+
+    // Legs mirrored onto the joint's output cores that no splitter lists.
+    (tj.outputCores ?? []).forEach((core) => {
+      push(core.label, 'output core', core.status === 'in_use');
+    });
+
     return options;
   }
   const olt = olts.find((item) => item.id === parts.id);

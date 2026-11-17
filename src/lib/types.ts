@@ -19,6 +19,8 @@ export interface Core {
   count: number;
   status?: CoreStatus;
   powerDbm?: number | null;
+  /** Set when a fibre link is patched to this core, so the link can free it later. */
+  connectedLinkId?: string | null;
   connectedUserFibreId?: string | null;
   connectedUserCoreLabel?: string | null;
 }
@@ -207,6 +209,8 @@ export interface Tj {
   cores: Core[];
   outputCores?: Core[];
   splitter: Splitter;
+  /** Every splitter fitted in this joint; `splitter` is the first of them. */
+  splitters?: Splitter[];
   userFibres?: UserFibre[];
   isCut: boolean;
   cutReason: string | null;
@@ -254,6 +258,8 @@ export interface LinkCore {
   status: 'connected' | 'free';
   fromCoreLabel: string | null;
   toCoreLabel: string | null;
+  /** Extra loss this strand carries, in dB (0 for a healthy core). */
+  lossDb?: number;
 }
 
 export interface FibreLink {
@@ -329,7 +335,7 @@ export interface OnuInput {
   username: string;
   macAddress?: string;
   vlanId?: number | null;
-  fibreId: string;
+  fibreId?: string;
   ponType?: PonType;
   onuClass?: OnuClass;
   cores: OnuCore[];
@@ -365,6 +371,8 @@ export interface TjInput {
   cores: Core[];
   outputCores?: Core[];
   splitter: Splitter;
+  /** Every splitter fitted in this joint; `splitter` is the first of them. */
+  splitters?: Splitter[];
   userFibres?: UserFibre[];
   isCut: boolean;
   cutReason?: string;

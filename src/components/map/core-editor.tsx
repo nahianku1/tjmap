@@ -2,22 +2,25 @@
 
 import { Plus, Trash2 } from 'lucide-react';
 import type { Core, CoreStatus } from '@/lib/types';
+import { tiaCoreColor, tubeCoreLabel } from '@/lib/fibre-cores';
 import { cn } from '@/lib/utils';
 
-const PALETTE = [
-  '#22d3ee', // Cyan
-  '#34d399', // Emerald
-  '#a78bfa', // Violet
-  '#fbbf24', // Amber
-  '#fb7185', // Rose
-  '#60a5fa', // Sky
-  '#a3e635', // Lime
-  '#fb923c', // Orange
-  '#f472b6', // Pink
-  '#facc15', // Yellow
-  '#94a3b8', // Slate
-  '#818cf8', // Indigo
-];
+/** Next core number whose label is not taken yet, so deletes cannot duplicate labels. */
+function nextCoreNumber(cores: Core[]): number {
+  const used = new Set(cores.map((core) => core.label.trim()));
+  let candidate = cores.length + 1;
+  while (used.has(tubeCoreLabel(candidate))) candidate += 1;
+  return candidate;
+}
+
+function makeCore(index: number): Core {
+  return {
+    label: tubeCoreLabel(index),
+    color: tiaCoreColor(index),
+    count: 1,
+    status: 'free', // By default all cores are free
+  };
+}
 
 export function CoreEditor({
   value,
@@ -25,6 +28,10 @@ export function CoreEditor({
   addLabel = 'Add core',
   emptyLabel = 'No cores added yet',
   splitterCoreLabel,
+  /** A splitter joint has one fixed input strand per splitter, so these lock. */
+  canAdd = true,
+  canRemove = true,
+  canChangeStatus = true,
   className,
 }: {
   value: Core[];
@@ -32,6 +39,9 @@ export function CoreEditor({
   addLabel?: string;
   emptyLabel?: string;
   splitterCoreLabel?: string;
+  canAdd?: boolean;
+  canRemove?: boolean;
+  canChangeStatus?: boolean;
   className?: string;
 }) {
   function update(index: number, patch: Partial<Core>) {
@@ -51,16 +61,7 @@ export function CoreEditor({
   }
 
   function add() {
-    const next = value.length + 1;
-    onChange([
-      ...value,
-      {
-        label: `Core ${String(next).padStart(2, '0')}`,
-        color: PALETTE[(next - 1) % PALETTE.length],
-        count: 1,
-        status: 'free', // By default all cores are free
-      },
-    ]);
+    onChange([...value, makeCore(nextCoreNumber(value))]);
   }
 
   const total = value.length;
@@ -140,13 +141,14 @@ export function CoreEditor({
               className="h-8 min-w-0 flex-1 rounded-lg border border-transparent bg-transparent px-2 text-[12px] font-medium outline-none transition focus:border-primary/30 focus:bg-white/70 dark:focus:bg-white/[0.06]"
             />
 
-            {splitterCoreLabel && core.label === splitterCoreLabel ? (
+            {splitterCoreLabel && core.label === splitterCoreLabel && canChangeStatus ? (
               <span className="inline-flex items-center gap-1 rounded-md bg-violet-500/15 border border-violet-500/30 px-1.5 py-0.5 text-[9.5px] font-semibold text-violet-600 dark:text-violet-300 shrink-0">
                 ⚡ Splitter Feed
               </span>
             ) : null}
 
             {/* Status toggle pill button */}
+            {canChangeStatus ? (
             <button
               type="button"
               onClick={() => toggleStatus(index, status)}
@@ -168,7 +170,34 @@ export function CoreEditor({
               />
               {isFree ? 'Free' : isDamaged ? 'Cut' : 'In Use'}
             </button>
+            ) : (
+              <>
+                <span
+                  title="Status comes from the cable patched to this core"
+                  className={cn(
+                    'inline-flex h-7 shrink-0 items-center gap-1 rounded-lg border px-2 text-[10.5px] font-semibold',
+                    isFree
+                      ? 'border-emerald-500/40 bg-emerald-500/15 text-emerald-700 dark:text-emerald-300'
+                      : isDamaged
+                        ? 'border-rose-500/40 bg-rose-500/15 text-rose-700 dark:text-rose-300'
+                        : 'border-sky-500/30 bg-sky-500/10 text-sky-700 dark:text-sky-300',
+                  )}
+                >
+                  <span
+                    className={cn(
+                      'size-1.5 rounded-full',
+                      isFree ? 'bg-emerald-500' : isDamaged ? 'bg-rose-500' : 'bg-sky-500',
+                    )}
+                  />
+                  {isFree ? 'Free' : isDamaged ? 'Cut' : 'In Use'}
+                </span>
+                <span className="inline-flex h-7 shrink-0 items-center gap-1 rounded-lg border border-violet-500/30 bg-violet-500/10 px-2 text-[10.5px] font-semibold text-violet-700 dark:text-violet-300">
+                  ⚡ Splitter input
+                </span>
+              </>
+            )}
 
+            {canRemove ? (
             <button
               type="button"
               onClick={() => remove(index)}
@@ -177,18 +206,21 @@ export function CoreEditor({
             >
               <Trash2 className="size-3.5" />
             </button>
+            ) : null}
           </div>
         );
       })}
 
-      <button
-        type="button"
-        onClick={add}
-        className="flex h-8 w-full items-center justify-center gap-1.5 rounded-lg border border-dashed border-border text-[11px] font-medium text-muted-foreground transition hover:border-primary/40 hover:text-primary"
-      >
-        <Plus className="size-3.5" />
-        {addLabel}
-      </button>
+      {canAdd ? (
+        <button
+          type="button"
+          onClick={add}
+          className="flex h-8 w-full items-center justify-center gap-1.5 rounded-lg border border-dashed border-border text-[11px] font-medium text-muted-foreground transition hover:border-primary/40 hover:text-primary"
+        >
+          <Plus className="size-3.5" />
+          {addLabel}
+        </button>
+      ) : null}
     </div>
   );
 }

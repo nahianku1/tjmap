@@ -308,7 +308,7 @@ export default function DistrictPage() {
                         </span>
                         <span className="inline-flex items-center gap-1">
                           <Cable className="size-2.5" />
-                          {area.linkCount} spans
+                          {area.linkCount} links
                         </span>
                         {area.cutCount > 0 ? (
                           <span className="inline-flex items-center gap-1 rounded-full bg-rose-500/10 px-2 py-0.5 font-semibold text-rose-500">

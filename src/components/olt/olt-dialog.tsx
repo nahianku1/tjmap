@@ -24,7 +24,8 @@ import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { api, ApiError } from '@/lib/api';
 import { OLT_PHOTO } from '@/lib/photos';
-import type { Area, Olt, PonPort, PortStatus } from '@/lib/types';
+import { FibreCorePicker } from '@/components/map/fibre-core-picker';
+import type { Area, FibreLink, Olt, PonPort, PortStatus } from '@/lib/types';
 
 const PON_DBM = [3, 5, 7, 9];
 const MAX_PORTS = 64;
@@ -37,6 +38,9 @@ interface OltDialogProps {
   draftPoint?: { lat: number; lng: number } | null;
   /** Area to assign when the cabinet is dropped on an area map. */
   defaultAreaId?: string | null;
+  /** Fibre spans on this map, used to move the cabinet onto another cable core. */
+  links?: FibreLink[];
+  onLinksChanged?: () => void | Promise<void>;
   onSaved: (olt: Olt, mode: 'create' | 'update') => void;
 }
 
@@ -82,6 +86,8 @@ export function OltDialog({
   olt,
   draftPoint,
   defaultAreaId,
+  links = [],
+  onLinksChanged,
   onSaved,
 }: OltDialogProps) {
   const [name, setName] = useState('');
@@ -345,6 +351,15 @@ export function OltDialog({
           <p className="text-[10px] text-muted-foreground">
             Optional. OLTs with coordinates appear as cabinet pins on the map.
           </p>
+
+          {olt ? (
+            <FibreCorePicker
+              kind="olt"
+              deviceId={olt.id}
+              links={links}
+              onPatched={onLinksChanged}
+            />
+          ) : null}
 
           <div className="space-y-2">
             <Label htmlFor="olt-form-notes">Notes</Label>

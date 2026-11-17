@@ -8,7 +8,9 @@ import {
   MapPin,
   Navigation,
   Radio,
+  Router,
   Search,
+  Server,
   Sparkles,
   Waypoints,
   X,
@@ -19,11 +21,13 @@ import {
   searchLocationSuggestions,
   type SearchResultItem,
 } from '@/lib/geocoding';
-import type { Tj } from '@/lib/types';
+import type { Olt, Onu, Tj } from '@/lib/types';
 import { cn } from '@/lib/utils';
 
 interface LocationSearchProps {
   tjs: Tj[];
+  olts: Olt[];
+  onus: Onu[];
   onSelectLocation: (item: SearchResultItem) => void;
   onClearPinned?: () => void;
   activePinned?: { title: string } | null;
@@ -32,6 +36,8 @@ interface LocationSearchProps {
 
 export function LocationSearch({
   tjs,
+  olts,
+  onus,
   onSelectLocation,
   onClearPinned,
   activePinned,
@@ -104,7 +110,11 @@ export function LocationSearch({
     setLoading(true);
     const timer = setTimeout(async () => {
       try {
-        const results = await searchLocationSuggestions(trimmed, tjs, controller.signal);
+        const results = await searchLocationSuggestions(
+          trimmed,
+          { tjs, olts, onus },
+          controller.signal,
+        );
         if (!controller.signal.aborted) {
           setSuggestions(results);
           setActiveIndex(-1);
@@ -121,7 +131,7 @@ export function LocationSearch({
       clearTimeout(timer);
       controller.abort();
     };
-  }, [query, tjs]);
+  }, [query, tjs, olts, onus]);
 
   function handleSelect(item: SearchResultItem) {
     setQuery(item.title);
@@ -168,7 +178,12 @@ export function LocationSearch({
   const showResults = isOpen && query.trim().length >= 2;
 
   const tjResults = suggestions.filter((s) => s.type === 'tj');
-  const placeResults = suggestions.filter((s) => s.type !== 'tj');
+  const oltResults = suggestions.filter((s) => s.type === 'olt');
+  const onuResults = suggestions.filter((s) => s.type === 'onu');
+  const placeResults = suggestions.filter(
+    (s) => s.type !== 'tj' && s.type !== 'olt' && s.type !== 'onu',
+  );
+  const deviceCount = tjResults.length + oltResults.length + onuResults.length;
 
   return (
     <div
@@ -206,7 +221,7 @@ export function LocationSearch({
           }}
           onFocus={() => setIsOpen(true)}
           onKeyDown={handleKeyDown}
-          placeholder="Search location, street, area, or joint..."
+          placeholder="Search location, joint, OLT, or ONU..."
           className="h-full min-w-0 flex-1 bg-transparent text-[12.5px] font-medium outline-none placeholder:text-muted-foreground/70"
           aria-label="Search map location"
         />
@@ -286,7 +301,8 @@ export function LocationSearch({
                 <div className="p-4 text-center text-[11.5px] text-muted-foreground">
                   <p className="font-semibold text-foreground/80">No locations found</p>
                   <p className="mt-0.5 text-[10.5px]">
-                    Try searching an area, landmark, or joint code (e.g. &quot;Gulshan&quot;, &quot;Agrabad&quot;, &quot;TJ-DHK-001&quot;).
+                    Try an area, landmark, joint code, OLT code, or ONU username (e.g.
+                    &quot;Gulshan&quot;, &quot;TJ-DHK-001&quot;, &quot;OLT-01&quot;).
                   </p>
                 </div>
               ) : null}
@@ -331,6 +347,86 @@ export function LocationSearch({
                 </div>
               ) : null}
 
+              {/* NETWORK OLTs SECTION */}
+              {oltResults.length > 0 ? (
+                <div className="mb-1 space-y-0.5">
+                  <div className="flex items-center gap-1.5 px-2.5 py-1 text-[9.5px] font-semibold uppercase tracking-[0.14em] text-amber-600 dark:text-amber-400">
+                    <Server className="size-3" />
+                    Network OLTs ({oltResults.length})
+                  </div>
+                  {oltResults.map((item, i) => (
+                    <button
+                      key={item.id}
+                      type="button"
+                      onClick={() => handleSelect(item)}
+                      className={cn(
+                        'flex w-full items-center gap-2.5 rounded-xl px-2.5 py-2 text-left transition',
+                        activeIndex === tjResults.length + i
+                          ? 'bg-amber-500/15 text-amber-700 dark:text-amber-300'
+                          : 'hover:bg-muted/70 text-foreground',
+                      )}
+                    >
+                      <span className="grid size-7 shrink-0 place-items-center rounded-lg bg-amber-500/15 text-amber-600 dark:text-amber-400">
+                        <Server className="size-3.5" />
+                      </span>
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-1.5">
+                          <p className="text-[12px] font-bold font-mono text-primary">
+                            {item.title}
+                          </p>
+                          <span className="rounded bg-amber-500/15 px-1 py-0.2 text-[9px] font-semibold text-amber-700 dark:text-amber-300">
+                            {item.category}
+                          </span>
+                        </div>
+                        <p className="mt-0.5 truncate text-[10.5px] text-muted-foreground">
+                          {item.subtitle}
+                        </p>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+
+              {/* NETWORK ONUs SECTION */}
+              {onuResults.length > 0 ? (
+                <div className="mb-1 space-y-0.5">
+                  <div className="flex items-center gap-1.5 px-2.5 py-1 text-[9.5px] font-semibold uppercase tracking-[0.14em] text-sky-600 dark:text-sky-400">
+                    <Router className="size-3" />
+                    Network ONUs ({onuResults.length})
+                  </div>
+                  {onuResults.map((item, i) => (
+                    <button
+                      key={item.id}
+                      type="button"
+                      onClick={() => handleSelect(item)}
+                      className={cn(
+                        'flex w-full items-center gap-2.5 rounded-xl px-2.5 py-2 text-left transition',
+                        activeIndex === tjResults.length + oltResults.length + i
+                          ? 'bg-sky-500/15 text-sky-700 dark:text-sky-300'
+                          : 'hover:bg-muted/70 text-foreground',
+                      )}
+                    >
+                      <span className="grid size-7 shrink-0 place-items-center rounded-lg bg-sky-500/15 text-sky-600 dark:text-sky-400">
+                        <Router className="size-3.5" />
+                      </span>
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-1.5">
+                          <p className="text-[12px] font-bold font-mono text-primary">
+                            {item.title}
+                          </p>
+                          <span className="rounded bg-sky-500/15 px-1 py-0.2 text-[9px] font-semibold text-sky-700 dark:text-sky-300">
+                            {item.category}
+                          </span>
+                        </div>
+                        <p className="mt-0.5 truncate text-[10.5px] text-muted-foreground">
+                          {item.subtitle}
+                        </p>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+
               {/* OPENSTREETMAP PLACES & ADDRESSES */}
               {placeResults.length > 0 ? (
                 <div className="space-y-0.5">
@@ -339,7 +435,7 @@ export function LocationSearch({
                     OpenStreetMap Locations ({placeResults.length})
                   </div>
                   {placeResults.map((item, i) => {
-                    const globalIdx = tjResults.length + i;
+                    const globalIdx = deviceCount + i;
                     return (
                       <button
                         key={item.id}

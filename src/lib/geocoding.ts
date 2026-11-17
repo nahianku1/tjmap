@@ -1,14 +1,22 @@
-import type { Tj } from '@/lib/types';
+import type { Olt, Onu, Tj } from '@/lib/types';
 
 export interface SearchResultItem {
   id: string;
-  type: 'place' | 'tj' | 'district' | 'landmark';
+  type: 'place' | 'tj' | 'olt' | 'onu' | 'district' | 'landmark';
   title: string;
   subtitle: string;
   lat: number;
   lng: number;
   tjId?: string;
+  oltId?: string;
+  onuId?: string;
   category?: string;
+}
+
+export interface SearchDevices {
+  tjs?: Tj[];
+  olts?: Olt[];
+  onus?: Onu[];
 }
 
 export const POPULAR_BANGLADESH_HUBS: SearchResultItem[] = [
@@ -117,32 +125,33 @@ export const POPULAR_BANGLADESH_HUBS: SearchResultItem[] = [
 const cache = new Map<string, SearchResultItem[]>();
 
 /**
- * Searches places and network TJs matching a query string.
+ * Searches places and network devices matching a query string.
  * Combines local network inventory with OpenStreetMap geocoding.
  */
 export async function searchLocationSuggestions(
   query: string,
-  tjs: Tj[] = [],
+  devices: SearchDevices = {},
   signal?: AbortSignal,
 ): Promise<SearchResultItem[]> {
+  const tjs = devices.tjs ?? [];
+  const olts = devices.olts ?? [];
+  const onus = devices.onus ?? [];
   const trimmed = query.trim().toLowerCase();
   if (!trimmed || trimmed.length < 2) return [];
 
-  const cacheKey = trimmed;
+  const cacheKey = `${trimmed}|${tjs.length}|${olts.length}|${onus.length}`;
   if (cache.has(cacheKey)) {
     return cache.get(cacheKey)!;
   }
 
   const results: SearchResultItem[] = [];
+  const matches = (values: (string | null | undefined)[]) =>
+    values.some((value) => Boolean(value) && value!.toLowerCase().includes(trimmed));
 
-  // 1. Search local network TJs in memory (instant typeahead)
-  const matchingTjs = tjs.filter((tj) => {
-    const codeMatch = tj.code.toLowerCase().includes(trimmed);
-    const nameMatch = tj.name ? tj.name.toLowerCase().includes(trimmed) : false;
-    const addressMatch = tj.address ? tj.address.toLowerCase().includes(trimmed) : false;
-    const fibreMatch = tj.fibreId ? tj.fibreId.toLowerCase().includes(trimmed) : false;
-    return codeMatch || nameMatch || addressMatch || fibreMatch;
-  });
+  // 1. Search local network devices in memory (instant typeahead)
+  const matchingTjs = tjs.filter((tj) =>
+    matches([tj.code, tj.name, tj.address, tj.fibreId]),
+  );
 
   matchingTjs.slice(0, 4).forEach((tj) => {
     results.push({
@@ -154,6 +163,46 @@ export async function searchLocationSuggestions(
       lng: tj.lng,
       tjId: tj.id,
       category: tj.tjType === 'cut' ? 'Cut Joint' : tj.tjType === 'pon_power' ? 'PON Power' : 'Splitter TJ',
+    });
+  });
+
+  const matchingOlts = olts.filter(
+    (olt) =>
+      olt.lat !== null &&
+      olt.lng !== null &&
+      matches([olt.code, olt.name, olt.notes, olt.ponPort, olt.uplinkPort, olt.areaName]),
+  );
+
+  matchingOlts.slice(0, 4).forEach((olt) => {
+    results.push({
+      id: `olt-${olt.id}`,
+      type: 'olt',
+      title: olt.code,
+      subtitle: olt.name || olt.areaName || 'Optical Line Terminal',
+      lat: olt.lat!,
+      lng: olt.lng!,
+      oltId: olt.id,
+      category: olt.ponPort ? `OLT · ${olt.ponPort}` : 'OLT',
+    });
+  });
+
+  const matchingOnus = onus.filter(
+    (onu) =>
+      onu.lat !== null &&
+      onu.lng !== null &&
+      matches([onu.username, onu.fibreId, onu.macAddress, onu.notes, onu.areaName]),
+  );
+
+  matchingOnus.slice(0, 4).forEach((onu) => {
+    results.push({
+      id: `onu-${onu.id}`,
+      type: 'onu',
+      title: onu.username,
+      subtitle: [onu.fibreId, onu.areaName].filter(Boolean).join(' · ') || 'Subscriber ONU',
+      lat: onu.lat!,
+      lng: onu.lng!,
+      onuId: onu.id,
+      category: 'ONU',
     });
   });
 

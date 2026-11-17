@@ -236,7 +236,7 @@ export function OnuDetailPanel({
 
                     <div className="space-y-1">
                       <p className="text-[9px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
-                        Route spans · {formatDistance(budget.distanceM)}
+                        Route links · {formatDistance(budget.distanceM)}
                       </p>
                       {budget.spans.map((span) => (
                         <div
@@ -250,9 +250,12 @@ export function OnuDetailPanel({
                             <span className="shrink-0 font-semibold">{span.totalLossDb.toFixed(2)} dB</span>
                           </div>
                           <p className="mt-0.5 text-[9px] text-muted-foreground">
-                            {span.fibreId} · {formatDistance(span.lengthM)} · fibre {span.fibreLossDb.toFixed(2)}{' '}
+                            {span.fibreId}
+                            {span.coreLabel ? ` · ${span.coreLabel}` : ''} ·{' '}
+                            {formatDistance(span.lengthM)} · fibre {span.fibreLossDb.toFixed(2)}{' '}
                             dB @ {span.attenuationDbPerKm} dB/km · splice {span.spliceLossDb.toFixed(2)} dB ·
                             connector {span.connectionLossDb.toFixed(2)} dB
+                            {span.extraLossDb > 0 ? ` · core +${span.extraLossDb.toFixed(2)} dB` : ''}
                           </p>
                         </div>
                       ))}
@@ -431,9 +434,7 @@ export function OnuDetailPanel({
                           </span>
                           <span className="min-w-0 flex-1">
                             <span className="flex items-center gap-1.5">
-                              <span className="truncate font-mono text-[10.5px] font-semibold">
-                                {span.fibreId}
-                              </span>
+                              <span className="truncate font-mono text-[10.5px] font-semibold">{span.fibreId}</span>
                               {span.status === 'cut' ? (
                                 <span className="rounded bg-rose-500/15 px-1 py-0.5 text-[8px] font-semibold uppercase text-rose-600 dark:text-rose-300">
                                   Cut

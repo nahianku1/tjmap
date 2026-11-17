@@ -5,9 +5,10 @@ import maplibregl from 'maplibre-gl';
 import type { StyleSpecification } from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import { useTheme } from 'next-themes';
-import { Loader2 } from 'lucide-react';
-import type { FibreLink, LinkPathPoint, Olt, Onu, Tj } from '@/lib/types';
-import { formatDistance, primaryCore } from '@/lib/utils';
+import { Cable, Loader2, X } from 'lucide-react';
+import type { DeviceKind, FibreLink, LinkPathPoint, Olt, Onu, Tj } from '@/lib/types';
+import type { DevicePort } from '@/lib/device-ports';
+import { cn, formatDistance, primaryCore } from '@/lib/utils';
 import {
   haversineMeters,
   pathLengthMeters,
@@ -22,9 +23,16 @@ import {
   type MeasureKind,
   type MeasureMode,
 } from '@/components/map/measure-panel';
-import { OLT_PHOTO, tjPhoto } from '@/lib/photos';
 
-export type MapMode = 'idle' | 'add-tj' | 'add-cut-tj' | 'add-olt' | 'add-onu' | 'draw-link';
+export type MapMode =
+  | 'idle'
+  | 'add-tj'
+  | 'add-cut-tj'
+  | 'add-olt'
+  | 'add-onu'
+  | 'draw-link'
+  /** Click a device, pick a port, click the far device, pick its port — no modal. */
+  | 'connect';
 
 interface NetworkMapProps {
   tjs: Tj[];
@@ -63,6 +71,7 @@ interface NetworkMapProps {
   onClearPinnedLocation?: () => void;
   onAddTjAtPinnedLocation?: (point: { lat: number; lng: number; address: string }) => void;
   onAddOltAtPinnedLocation?: (point: { lat: number; lng: number; address: string }) => void;
+  onAddOnuAtPinnedLocation?: (point: { lat: number; lng: number; address: string }) => void;
   /** Admins can drag devices to new coordinates; the move is committed on drop. */
   canMoveDevices?: boolean;
   onMoveDevice?: (move: {
@@ -73,6 +82,21 @@ interface NetworkMapProps {
   }) => void;
   /** Saves a dragged cable route (its waypoint coordinates). */
   onMoveLinkPath?: (id: string, path: LinkPathPoint[]) => void;
+  /** Device whose ports the connection tool is showing in its anchored popover. */
+  connectTarget?: {
+    kind: DeviceKind;
+    id: string;
+    code: string;
+    name: string | null;
+    lat?: number;
+    lng?: number;
+  } | null;
+  /** Ports of `connectTarget`, free and occupied, for the connection tool. */
+  connectPorts?: DevicePort[];
+  /** A device was clicked while the connection tool is active. */
+  onConnectDevice?: (device: { kind: DeviceKind; id: string }) => void;
+  onPickConnectPort?: (label: string) => void;
+  onCancelConnectTarget?: () => void;
 }
 
 const OSM_TILE_URLS = [
@@ -161,7 +185,10 @@ function escapeHtml(value: string): string {
   });
 }
 
-function linksToGeoJson(links: FibreLink[]) {
+function linksToGeoJson(
+  links: FibreLink[],
+  lanes: Map<string, { offset: number; stagger: number }> = new Map(),
+) {
   return {
     type: 'FeatureCollection' as const,
     features: links.map((link) => ({
@@ -171,6 +198,7 @@ function linksToGeoJson(links: FibreLink[]) {
         fibreId: link.fibreId,
         status: link.status,
         color: link.color ?? null,
+        offset: lanes.get(link.id)?.offset ?? 0,
       },
       geometry: {
         type: 'LineString' as const,
@@ -178,6 +206,62 @@ function linksToGeoJson(links: FibreLink[]) {
       },
     })),
   };
+}
+
+const PARALLEL_LINK_GAP_PX = 7;
+const PARALLEL_LABEL_GAP_PX = 40;
+
+interface LinkLane {
+  /** Perpendicular pixel shift for the line itself. */
+  offset: number;
+  /** Along-route pixel shift for the link label, so IDs do not stack. */
+  stagger: number;
+}
+
+function linkEndKey(link: FibreLink, side: 'from' | 'to'): string {
+  if (side === 'from') {
+    if (link.fromTjId) return `tj:${link.fromTjId}`;
+    if (link.fromOltId) return `olt:${link.fromOltId}`;
+    if (link.fromOnuId) return `onu:${link.fromOnuId}`;
+    return `${link.fromLat.toFixed(5)},${link.fromLng.toFixed(5)}`;
+  }
+  if (link.toTjId) return `tj:${link.toTjId}`;
+  if (link.toOltId) return `olt:${link.toOltId}`;
+  if (link.toOnuId) return `onu:${link.toOnuId}`;
+  return `${link.toLat.toFixed(5)},${link.toLng.toFixed(5)}`;
+}
+
+/**
+ * Links between the same two devices otherwise draw on top of each other, so
+ * each one is fanned out with a small pixel offset perpendicular to its route.
+ */
+function linkParallelLanes(links: FibreLink[]): Map<string, LinkLane> {
+  const groups = new Map<string, FibreLink[]>();
+  links.forEach((link) => {
+    const from = linkEndKey(link, 'from');
+    const to = linkEndKey(link, 'to');
+    const key = from === to ? from : [from, to].sort().join('|');
+    const group = groups.get(key);
+    if (group) group.push(link);
+    else groups.set(key, [link]);
+  });
+
+  const lanes = new Map<string, LinkLane>();
+  groups.forEach((group) => {
+    if (group.length < 2) return;
+    const ordered = [...group].sort((a, b) => a.id.localeCompare(b.id));
+    ordered.forEach((link, index) => {
+      const step = index - (ordered.length - 1) / 2;
+      // A link stored in the opposite direction would otherwise offset to the
+      // same side as its neighbour.
+      const reversed = linkEndKey(link, 'from') !== linkEndKey(ordered[0], 'from');
+      lanes.set(link.id, {
+        offset: step * PARALLEL_LINK_GAP_PX * (reversed ? -1 : 1),
+        stagger: step * PARALLEL_LABEL_GAP_PX,
+      });
+    });
+  });
+  return lanes;
 }
 
 function draftToGeoJson(path: LinkPathPoint[], cursor: { lng: number; lat: number } | null) {
@@ -300,6 +384,7 @@ function addNetworkLayers(map: maplibregl.Map, dark: boolean) {
         'line-width': ['interpolate', ['linear'], ['zoom'], 4, 5, 10, 8, 15, 11] as never,
         'line-blur': 7,
         'line-opacity': dark ? 0.35 : 0.18,
+        'line-offset': ['get', 'offset'] as never,
       },
     });
   } else {
@@ -327,6 +412,7 @@ function addNetworkLayers(map: maplibregl.Map, dark: boolean) {
         'line-color': ['case', ['!=', ['get', 'color'], null], ['get', 'color'], '#000000'] as never,
         'line-width': ['interpolate', ['linear'], ['zoom'], 4, 1.2, 10, 2, 15, 3] as never,
         'line-opacity': 0.95,
+        'line-offset': ['get', 'offset'] as never,
       },
     });
   } else {
@@ -350,6 +436,7 @@ function addNetworkLayers(map: maplibregl.Map, dark: boolean) {
         'line-width': ['interpolate', ['linear'], ['zoom'], 4, 1.4, 10, 2.2, 15, 3.2] as never,
         'line-dasharray': [2.2, 1.7],
         'line-opacity': 0.95,
+        'line-offset': ['get', 'offset'] as never,
       },
     });
   }
@@ -366,6 +453,7 @@ function addNetworkLayers(map: maplibregl.Map, dark: boolean) {
         'line-width': ['interpolate', ['linear'], ['zoom'], 6, 0.7, 12, 1.5] as never,
         'line-opacity': 0.85,
         'line-dasharray': [1, 5],
+        'line-offset': ['get', 'offset'] as never,
       },
     });
   } else {
@@ -387,6 +475,7 @@ function addNetworkLayers(map: maplibregl.Map, dark: boolean) {
         'line-color': '#ffffff',
         'line-width': 20,
         'line-opacity': 0.001,
+        'line-offset': ['get', 'offset'] as never,
       },
     });
   }
@@ -470,28 +559,50 @@ function addNetworkLayers(map: maplibregl.Map, dark: boolean) {
         'line-opacity': 0.9,
         'line-blur': 1.2,
         'line-dasharray': [2.2, 1.6],
+        'line-offset': ['get', 'offset'] as never,
       },
     });
   }
 }
 
 function syncLinkData(map: maplibregl.Map, links: FibreLink[], selectedLinkId: string | null) {
+  // Lanes are computed across every link so the selected overlay keeps the
+  // same parallel lane as its own line.
+  const lanes = linkParallelLanes(links);
   const source = map.getSource('links') as maplibregl.GeoJSONSource | undefined;
-  source?.setData(linksToGeoJson(links) as never);
+  source?.setData(linksToGeoJson(links, lanes) as never);
 
   const selectedSource = map.getSource('selected-link') as maplibregl.GeoJSONSource | undefined;
   const selected = links.filter((link) => link.id === selectedLinkId);
-  selectedSource?.setData(linksToGeoJson(selected) as never);
+  selectedSource?.setData(linksToGeoJson(selected, lanes) as never);
 }
+
+/** Lucide-style icon markup shared by the device pins. */
+function pinIcon(paths: string, size = 16): string {
+  return `<svg class="tj-marker__icon" viewBox="0 0 24 24" width="${size}" height="${size}" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths}</svg>`;
+}
+
+// Terminal joint: a fibre split/splice node.
+const TJ_ICON = pinIcon(
+  '<path d="M16 3h5v5"/><path d="M8 3H3v5"/><path d="M12 22v-8.3a4 4 0 0 0-1.172-2.872L3 3"/><path d="m15 9 6-6"/>',
+);
+// OLT: a rack-mounted optical line terminal.
+const OLT_ICON = pinIcon(
+  '<rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><path d="M6 6h.01"/><path d="M6 18h.01"/>',
+  22,
+);
+// ONU: the subscriber's wireless router.
+const ONU_ICON = pinIcon(
+  '<path d="M12 20h.01"/><path d="M2 8.82a15 15 0 0 1 20 0"/><path d="M5 12.859a10 10 0 0 1 14 0"/><path d="M8.5 16.429a5 5 0 0 1 7 0"/>',
+);
 
 function buildMarkerContent(tj: Tj): string {
   const isCut = tj.isCut || tj.tjType === 'cut';
   const isPon = tj.tjType === 'pon_power';
-  const photo = tjPhoto(isCut ? 'cut' : tj.tjType);
   return `
     ${isCut ? '<span class="tj-marker__pulse"></span>' : ''}
     <span class="tj-marker__pin">
-      <img class="tj-marker__photo" src="${photo}" alt="" loading="lazy" />
+      ${TJ_ICON}
       <span class="tj-marker__ring"></span>
       ${isCut ? '<span class="tj-marker__cut-badge">!</span>' : isPon ? '<span class="tj-marker__cut-badge" style="background:#f59e0b;color:#000;font-size:8px;">⚡</span>' : ''}
     </span>
@@ -502,10 +613,7 @@ function buildMarkerContent(tj: Tj): string {
 function buildOnuMarkerContent(onu: Onu): string {
   return `
     <span class="onu-marker__pin">
-      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-        <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
-        <circle cx="12" cy="7" r="4"/>
-      </svg>
+      ${ONU_ICON}
     </span>
     <span class="tj-marker__chip onu-marker__chip">${escapeHtml(onu.username || onu.fibreId || 'ONU')}</span>
   `;
@@ -514,7 +622,7 @@ function buildOnuMarkerContent(onu: Onu): string {
 function buildOltMarkerContent(olt: Olt): string {
   return `
     <span class="olt-marker__tile">
-      <img src="${OLT_PHOTO}" alt="" loading="lazy" />
+      ${OLT_ICON}
       <span class="olt-marker__badge">OLT</span>
     </span>
     <span class="tj-marker__chip olt-marker__chip">${escapeHtml(olt.code)}</span>
@@ -548,9 +656,15 @@ export function NetworkMap({
   onClearPinnedLocation,
   onAddTjAtPinnedLocation,
   onAddOltAtPinnedLocation,
+  onAddOnuAtPinnedLocation,
   canMoveDevices = false,
   onMoveDevice,
   onMoveLinkPath,
+  connectTarget = null,
+  connectPorts = [],
+  onConnectDevice,
+  onPickConnectPort,
+  onCancelConnectTarget,
 }: NetworkMapProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
@@ -565,6 +679,7 @@ export function NetworkMap({
   const { resolvedTheme } = useTheme();
   const [ready, setReady] = useState(false);
   const [styleVersion, setStyleVersion] = useState(0);
+  const [connectAnchor, setConnectAnchor] = useState<{ x: number; y: number } | null>(null);
 
   const themeRef = useRef(resolvedTheme);
   const appliedThemeRef = useRef<string | null>(null);
@@ -596,43 +711,88 @@ export function NetworkMap({
     moved: boolean;
   } | null>(null);
 
-  // A live overlay while a device is dragged: attached link lines and their
-  // distances follow the cursor before the move is persisted on drop. The dragged
-  // marker itself is moved natively by MapLibre.
+  // Link endpoints are derived from the live device records rather than trusting
+  // the link's stored endpoint coordinates, so a moved device can never leave its
+  // spans rendered at the old position. While a device is mid-drag the cursor
+  // position is used until the save lands. Lengths are recomputed from the same
+  // resolved geometry.
   const viewLinks = useMemo(() => {
-    if (!dragging && !linkPathPreview) return links;
-    return links.map((link) => {
-      const fromMoved = Boolean(
-        dragging &&
-          ((dragging.kind === 'tj' && link.fromTjId === dragging.id) ||
-            (dragging.kind === 'olt' && link.fromOltId === dragging.id) ||
-            (dragging.kind === 'onu' && link.fromOnuId === dragging.id)),
-      );
-      const toMoved = Boolean(
-        dragging &&
-          ((dragging.kind === 'tj' && link.toTjId === dragging.id) ||
-            (dragging.kind === 'olt' && link.toOltId === dragging.id) ||
-            (dragging.kind === 'onu' && link.toOnuId === dragging.id)),
-      );
-      const pathChanged = linkPathPreview?.id === link.id;
-      if (!fromMoved && !toMoved && !pathChanged) return link;
+    const tjById = new Map(tjs.map((item) => [item.id, item]));
+    const oltById = new Map(olts.map((item) => [item.id, item]));
+    const onuById = new Map(onus.map((item) => [item.id, item]));
 
-      const fromLat = fromMoved && dragging ? dragging.lat : link.fromLat;
-      const fromLng = fromMoved && dragging ? dragging.lng : link.fromLng;
-      const toLat = toMoved && dragging ? dragging.lat : link.toLat;
-      const toLng = toMoved && dragging ? dragging.lng : link.toLng;
+    // Endpoints are always resolved from the live device records. A link's
+    // stored from/to coordinates can lag behind (or come back stale after a
+    // refetch), which previously made a span jump back to its old position
+    // after the device had already been moved.
+    const resolveEndpoints = (link: FibreLink) => {
+      const fromDevice = link.fromTjId
+        ? tjById.get(link.fromTjId)
+        : link.fromOltId
+          ? oltById.get(link.fromOltId)
+          : link.fromOnuId
+            ? onuById.get(link.fromOnuId)
+            : undefined;
+      const toDevice = link.toTjId
+        ? tjById.get(link.toTjId)
+        : link.toOltId
+          ? oltById.get(link.toOltId)
+          : link.toOnuId
+            ? onuById.get(link.toOnuId)
+            : undefined;
+
+      let fromLat = fromDevice?.lat ?? link.fromLat;
+      let fromLng = fromDevice?.lng ?? link.fromLng;
+      let toLat = toDevice?.lat ?? link.toLat;
+      let toLng = toDevice?.lng ?? link.toLng;
+
+      // Follow the cursor while a device is mid-drag, before it is saved.
+      if (dragging) {
+        if (
+          (dragging.kind === 'tj' && link.fromTjId === dragging.id) ||
+          (dragging.kind === 'olt' && link.fromOltId === dragging.id) ||
+          (dragging.kind === 'onu' && link.fromOnuId === dragging.id)
+        ) {
+          fromLat = dragging.lat;
+          fromLng = dragging.lng;
+        }
+        if (
+          (dragging.kind === 'tj' && link.toTjId === dragging.id) ||
+          (dragging.kind === 'olt' && link.toOltId === dragging.id) ||
+          (dragging.kind === 'onu' && link.toOnuId === dragging.id)
+        ) {
+          toLat = dragging.lat;
+          toLng = dragging.lng;
+        }
+      }
+
+      return { fromLat, fromLng, toLat, toLng };
+    };
+
+    return links.map((link) => {
+      const endpoints = resolveEndpoints(link);
+      const pathChanged = linkPathPreview?.id === link.id;
       const path = pathChanged && linkPathPreview ? linkPathPreview.path : link.path;
+      const coordsChanged =
+        endpoints.fromLat !== link.fromLat ||
+        endpoints.fromLng !== link.fromLng ||
+        endpoints.toLat !== link.toLat ||
+        endpoints.toLng !== link.toLng;
+      if (!coordsChanged && !pathChanged) return link;
       return {
         ...link,
-        fromLat,
-        fromLng,
-        toLat,
-        toLng,
+        ...endpoints,
         path,
-        lengthM: routeLengthMeters(fromLat, fromLng, toLat, toLng, path),
+        lengthM: routeLengthMeters(
+          endpoints.fromLat,
+          endpoints.fromLng,
+          endpoints.toLat,
+          endpoints.toLng,
+          path,
+        ),
       };
     });
-  }, [links, dragging, linkPathPreview]);
+  }, [links, tjs, olts, onus, dragging, linkPathPreview]);
 
   // Release the overlay once the saved device arrives at the dragged position.
   useEffect(() => {
@@ -717,18 +877,30 @@ export function NetworkMap({
   const measureDistance = useMemo(() => pathLengthMeters(measurePoints), [measurePoints]);
   const measurePerimeter = useMemo(() => polygonPerimeterMeters(measurePoints), [measurePoints]);
   const measureArea = useMemo(() => polygonAreaM2(measurePoints), [measurePoints]);
+
+  // Splitters carry their own sections so a joint's feed and branches stay apart.
+  const connectPortGroups = useMemo(() => {
+    const groups: { name: string | null; ports: DevicePort[] }[] = [];
+    connectPorts.forEach((port) => {
+      const name = port.group ?? null;
+      const last = groups[groups.length - 1];
+      if (last && last.name === name) last.ports.push(port);
+      else groups.push({ name, ports: [port] });
+    });
+    return groups;
+  }, [connectPorts]);
   const measureRenderMode: MeasureMode =
     measureMode !== 'none' ? measureMode : measureKind === 'area' ? 'area' : 'distance';
   const measureRenderModeRef = useRef<MeasureMode>(measureRenderMode);
   measureRenderModeRef.current = measureRenderMode;
 
-  const callbacks = useRef({ onSelectTj, onSelectLink, onSelectOlt, onSelectOnu, onMapClick, onBackgroundClick });
+  const callbacks = useRef({ onSelectTj, onSelectLink, onSelectOlt, onSelectOnu, onMapClick, onBackgroundClick, onConnectDevice });
   const drawCallbacks = useRef({ onDrawPoint, onMoveDrawPoint, onFinishDraw });
   drawCallbacks.current = { onDrawPoint, onMoveDrawPoint, onFinishDraw };
   modeRef.current = mode;
   linksRef.current = viewLinks;
   selectedLinkRef.current = selectedLinkId;
-  callbacks.current = { onSelectTj, onSelectLink, onSelectOlt, onSelectOnu, onMapClick, onBackgroundClick };
+  callbacks.current = { onSelectTj, onSelectLink, onSelectOlt, onSelectOnu, onMapClick, onBackgroundClick, onConnectDevice };
 
   const VIEW_KEY = 'fibreAtlas.mapView';
 
@@ -851,6 +1023,10 @@ export function NetworkMap({
         drawCallbacks.current.onDrawPoint?.({ lng: event.lngLat.lng, lat: event.lngLat.lat });
         return;
       }
+      if (modeRef.current === 'connect') {
+        drawCallbacks.current.onDrawPoint?.({ lng: event.lngLat.lng, lat: event.lngLat.lat });
+        return;
+      }
       if (
         modeRef.current === 'add-tj' ||
         modeRef.current === 'add-cut-tj' ||
@@ -969,7 +1145,7 @@ export function NetworkMap({
         );
         return;
       }
-      if (modeRef.current === 'draw-link') {
+      if (modeRef.current === 'draw-link' || modeRef.current === 'connect') {
         map.getCanvas().style.cursor = 'crosshair';
         drawCursorRef.current = { lng: event.lngLat.lng, lat: event.lngLat.lat };
         if (drawPathRef.current.length > 0) {
@@ -1112,7 +1288,7 @@ export function NetworkMap({
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !ready) return;
-    const drawing = mode === 'draw-link';
+    const drawing = mode === 'draw-link' || mode === 'connect';
     syncDraftData(map, drawing ? drawPath : [], drawing ? drawCursorRef.current : null);
   }, [drawPath, mode, ready, styleVersion]);
 
@@ -1123,7 +1299,7 @@ export function NetworkMap({
 
     routeMarkerRef.current.forEach((marker) => marker.remove());
     routeMarkerRef.current = [];
-    if (mode !== 'draw-link') return;
+    if (mode !== 'draw-link' && mode !== 'connect') return;
 
     drawPath.forEach((point, index) => {
       const element = document.createElement('button');
@@ -1308,6 +1484,10 @@ export function NetworkMap({
             drawCallbacks.current.onDrawPoint?.(point);
             return;
           }
+          if (modeRef.current === 'connect') {
+            callbacks.current.onConnectDevice?.({ kind: 'tj', id: tj.id });
+            return;
+          }
           callbacks.current.onSelectTj(tj.id);
         });
 
@@ -1363,7 +1543,11 @@ export function NetworkMap({
       const element = marker.getElement();
       const isCut = tj.isCut || tj.tjType === 'cut';
       const isPon = tj.tjType === 'pon_power';
-      element.className = `tj-marker${isCut ? ' is-cut' : ''}${isPon ? ' is-pon' : ''}`;
+      // Keep MapLibre's own positioning classes: replacing className drops them and
+      // leaves the pin off its coordinate, away from the cable ends.
+      element.classList.add('tj-marker');
+      element.classList.toggle('is-cut', isCut);
+      element.classList.toggle('is-pon', isPon);
       element.style.setProperty('--core-color', primaryCore(tj.cores));
       element.innerHTML = buildMarkerContent(tj);
       element.classList.toggle('is-selected', tj.id === selectedTjId);
@@ -1407,6 +1591,10 @@ export function NetworkMap({
           }
           if (modeRef.current === 'draw-link') {
             drawCallbacks.current.onDrawPoint?.(point);
+            return;
+          }
+          if (modeRef.current === 'connect') {
+            callbacks.current.onConnectDevice?.({ kind: 'olt', id: olt.id });
             return;
           }
           callbacks.current.onSelectOlt(olt.id);
@@ -1503,6 +1691,10 @@ export function NetworkMap({
             drawCallbacks.current.onDrawPoint?.(point);
             return;
           }
+          if (modeRef.current === 'connect') {
+            callbacks.current.onConnectDevice?.({ kind: 'onu', id: onu.id });
+            return;
+          }
           callbacks.current.onSelectOnu?.(onu.id);
         });
 
@@ -1574,6 +1766,7 @@ export function NetworkMap({
     });
 
     const visible = map.getZoom() >= 8.6;
+    const lanes = linkParallelLanes(viewLinks);
     viewLinks.forEach((link) => {
       const movedWithDrag = Boolean(
         (dragging &&
@@ -1607,6 +1800,24 @@ export function NetworkMap({
       marker.setLngLat(
         routeMidpoint(link.fromLat, link.fromLng, link.toLat, link.toLng, link.path),
       );
+      // Keep the label beside its own line when several share one device pair,
+      // and slide it along the route so the fibre IDs do not stack.
+      const lane = lanes.get(link.id);
+      if (lane && (lane.offset !== 0 || lane.stagger !== 0)) {
+        const fromPoint = map.project([link.fromLng, link.fromLat]);
+        const toPoint = map.project([link.toLng, link.toLat]);
+        const dx = toPoint.x - fromPoint.x;
+        const dy = toPoint.y - fromPoint.y;
+        const length = Math.hypot(dx, dy) || 1;
+        const ux = dx / length;
+        const uy = dy / length;
+        marker.setOffset([
+          -uy * lane.offset + ux * lane.stagger,
+          ux * lane.offset + uy * lane.stagger,
+        ]);
+      } else {
+        marker.setOffset([0, 0]);
+      }
       const element = marker.getElement();
       element.dataset.status = link.status;
       element.textContent = movedWithDrag
@@ -1795,6 +2006,9 @@ export function NetworkMap({
           <button type="button" class="location-pin-card__btn-add location-pin-card__btn-add-olt">
             + Add OLT Here
           </button>
+          <button type="button" class="location-pin-card__btn-add location-pin-card__btn-add-onu">
+            + Add ONU Here
+          </button>
         </div>
       </div>
     `;
@@ -1825,6 +2039,16 @@ export function NetworkMap({
       });
     });
 
+    const addOnuBtn = el.querySelector('.location-pin-card__btn-add-onu');
+    addOnuBtn?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      onAddOnuAtPinnedLocation?.({
+        lat: pinnedLocation.lat,
+        lng: pinnedLocation.lng,
+        address: pinnedLocation.title,
+      });
+    });
+
     const marker = new maplibregl.Marker({
       element: el,
       anchor: 'bottom',
@@ -1838,12 +2062,135 @@ export function NetworkMap({
       marker.remove();
       pinnedMarkerRef.current = null;
     };
-  }, [pinnedLocation, ready, onClearPinnedLocation, onAddTjAtPinnedLocation, onAddOltAtPinnedLocation]);
+  }, [pinnedLocation, ready, onClearPinnedLocation, onAddTjAtPinnedLocation, onAddOltAtPinnedLocation, onAddOnuAtPinnedLocation]);
+
+  // Keep the connection tool's port popover pinned to its device while the map moves.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !connectTarget || connectTarget.lat == null || connectTarget.lng == null) {
+      setConnectAnchor(null);
+      return;
+    }
+    const targetLng = connectTarget.lng;
+    const targetLat = connectTarget.lat;
+    const place = () => {
+      const point = map.project([targetLng, targetLat]);
+      const width = containerRef.current?.clientWidth ?? 800;
+      setConnectAnchor({
+        x: Math.min(Math.max(point.x, 132), Math.max(132, width - 132)),
+        y: point.y,
+      });
+    };
+    place();
+    map.on('move', place);
+    map.on('zoom', place);
+    map.on('resize', place);
+    return () => {
+      map.off('move', place);
+      map.off('zoom', place);
+      map.off('resize', place);
+    };
+  }, [connectTarget, ready]);
 
   return (
     <div className="map-frame">
       <div ref={containerRef} className="absolute inset-0" />
-      {ready && mode !== 'draw-link' ? (
+      {connectTarget ? (
+        <div
+          className="absolute z-30 w-[252px]"
+          style={
+            connectAnchor
+              ? {
+                  left: connectAnchor.x,
+                  top: Math.max(8, connectAnchor.y - 16),
+                  transform: 'translate(-50%, -100%)',
+                }
+              : { left: '50%', top: 88, transform: 'translateX(-50%)' }
+          }
+        >
+          <div className="overflow-hidden rounded-2xl border border-white/60 bg-background/95 shadow-2xl backdrop-blur dark:border-white/10">
+            <div className="flex items-center gap-2 border-b border-border/60 px-2.5 py-2">
+              <span className="grid size-6 shrink-0 place-items-center rounded-lg bg-primary/12 text-primary">
+                <Cable className="size-3.5" />
+              </span>
+              <div className="min-w-0 flex-1">
+                <p className="truncate font-mono text-[11px] font-semibold">{connectTarget.code}</p>
+                <p className="text-[8.5px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
+                  {connectTarget.kind.toUpperCase()} · pick a port
+                </p>
+              </div>
+              <button
+                type="button"
+                aria-label="Close port picker"
+                onClick={() => onCancelConnectTarget?.()}
+                className="grid size-6 shrink-0 place-items-center rounded-md text-muted-foreground transition hover:bg-muted hover:text-foreground"
+              >
+                <X className="size-3.5" />
+              </button>
+            </div>
+            <div className="max-h-64 overflow-y-auto p-1">
+              {connectPorts.length === 0 ? (
+                <p className="px-2 py-3 text-center text-[10.5px] text-muted-foreground">
+                  This device has no ports to patch.
+                </p>
+              ) : (
+                connectPortGroups.map((group, groupIndex) => (
+                  <div key={group.name ?? `ports-${groupIndex}`}>
+                    {group.name ? (
+                      <p className="px-2 pb-0.5 pt-1.5 text-[8px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
+                        {group.name}
+                      </p>
+                    ) : null}
+                    {group.ports.map((port) => (
+                      <button
+                        key={port.label}
+                        type="button"
+                        aria-label={`${connectTarget.code} port ${port.label}`}
+                        disabled={port.used}
+                        onClick={() => onPickConnectPort?.(port.label)}
+                        className={cn(
+                          'flex w-full items-center gap-1.5 rounded-lg px-2 py-1.5 text-left transition',
+                          port.used
+                            ? 'cursor-not-allowed opacity-45'
+                            : 'hover:bg-primary/10',
+                        )}
+                      >
+                        <span
+                          className={cn(
+                            'inline-block size-2.5 shrink-0 rounded-full border border-white/70 dark:border-slate-900',
+                            !port.color && 'border-dashed border-muted-foreground/50 bg-transparent',
+                          )}
+                          style={port.color ? { backgroundColor: port.color } : undefined}
+                        />
+                        <span className="min-w-0 flex-1 truncate font-mono text-[10.5px] font-semibold">
+                          {port.label}
+                        </span>
+                        <span className="max-w-[86px] truncate text-[8.5px] text-muted-foreground">
+                          {port.hint}
+                        </span>
+                        <span
+                          className={cn(
+                            'shrink-0 rounded px-1 py-0.5 text-[8px] font-semibold uppercase tracking-wide',
+                            port.used
+                              ? 'bg-rose-500/15 text-rose-600 dark:text-rose-300'
+                              : 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300',
+                          )}
+                        >
+                          {port.used ? 'in use' : 'free'}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                ))
+              )}
+            </div>
+            <div className="border-t border-border/60 px-2.5 py-1.5 text-[8.5px] text-muted-foreground">
+              Occupied ports stay disabled · Esc cancels
+            </div>
+          </div>
+        </div>
+      ) : null}
+      {ready && mode !== 'draw-link' && mode !== 'connect' ? (
         <MeasurePanel
           mode={measureMode}
           kind={measureKind}

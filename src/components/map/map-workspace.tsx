@@ -4,7 +4,7 @@ import dynamic from 'next/dynamic';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import useSWR from 'swr';
-import { Check, Loader2, RefreshCw, Route, Trash2, Undo2, WifiOff, X } from 'lucide-react';
+import { Cable, Loader2, RefreshCw, Trash2, Undo2, WifiOff, X } from 'lucide-react';
 import { toast } from 'sonner';
 import { Topbar } from '@/components/dashboard/topbar';
 import { Sidebar, type DeviceFilter } from '@/components/dashboard/sidebar';
@@ -17,6 +17,7 @@ import { OnuDetailPanel } from '@/components/onu/onu-detail-panel';
 import { OltDialog } from '@/components/olt/olt-dialog';
 import { TjFormDialog } from '@/components/map/tj-form-dialog';
 import { LinkDialog } from '@/components/map/link-dialog';
+import { LinkTypeDialog } from '@/components/map/link-type-dialog';
 import { LinkDetailPanel } from '@/components/map/link-detail-panel';
 import { ConfirmDialog } from '@/components/map/confirm-dialog';
 import { LocationSearch } from '@/components/map/location-search';
@@ -30,6 +31,7 @@ import { useAuth } from '@/lib/auth-context';
 import type {
   Area,
   FibreLink,
+  DeviceKind,
   LinkDeviceRef,
   LinkPathPoint,
   Network,
@@ -47,6 +49,9 @@ import {
   type MapTransferFile,
 } from '@/lib/map-transfer';
 import { cn, formatDistance } from '@/lib/utils';
+import { routeLengthMeters } from '@/lib/route';
+import { devicePorts } from '@/lib/device-ports';
+import type { FibreCableType } from '@/lib/fibre-cores';
 
 const NetworkMap = dynamic(
   () => import('@/components/map/network-map').then((module) => ({ default: module.NetworkMap })),
@@ -107,10 +112,16 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
     { revalidateOnFocus: false, shouldRetryOnError: false },
   );
 
-  const tjs = useMemo(() => data?.tjs ?? [], [data]);
-  const links = useMemo(() => data?.links ?? [], [data]);
-  const olts = useMemo(() => data?.olts ?? [], [data]);
-  const onus = useMemo(() => data?.onus ?? [], [data]);
+  // The map works against local device/link state so an optimistic move can be
+  // applied and kept. SWR data is copied in whenever a fresh payload arrives.
+  const [localTjs, setLocalTjs] = useState<Tj[]>(data?.tjs ?? []);
+  const [localOlts, setLocalOlts] = useState<Olt[]>(data?.olts ?? []);
+  const [localOnus, setLocalOnus] = useState<Onu[]>(data?.onus ?? []);
+  const [localLinks, setLinks] = useState<FibreLink[]>(data?.links ?? []);
+  const tjs = localTjs;
+  const olts = localOlts;
+  const onus = localOnus;
+  const links = localLinks;
   const cutCount = useMemo(() => tjs.filter((tj) => tj.isCut).length, [tjs]);
 
   const [mode, setMode] = useState<MapMode>('idle');
@@ -149,9 +160,18 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
     subtitle?: string;
   } | null>(null);
   const [linkDialog, setLinkDialog] = useState<LinkDialogState | null>(null);
-  const [drawingLink, setDrawingLink] = useState(false);
+  // Map connection tool: click device → pick port → click far device → pick port.
+  const [connectFrom, setConnectFrom] = useState<{ ref: LinkDeviceRef; port: string } | null>(null);
+  const [connectTarget, setConnectTarget] = useState<LinkDeviceRef | null>(null);
+  const [connectBends, setConnectBends] = useState<LinkPathPoint[]>([]);
+  /** Ports picked on the map, still to be confirmed in the cable form. */
+  const [linkDialogPorts, setLinkDialogPorts] = useState<{ from: string; to: string } | null>(null);
+  const [linkDialogInitialPath, setLinkDialogInitialPath] = useState<LinkPathPoint[] | null>(null);
+  /** Cable construction picker opened before the map picks ports. */
+  const [linkTypePicker, setLinkTypePicker] = useState<{ ref: LinkDeviceRef | null } | null>(null);
+  const [connectFibreType, setConnectFibreType] = useState<FibreCableType>('tube');
+  const connecting = mode === 'connect';
   const [linkPath, setLinkPath] = useState<LinkPathPoint[]>([]);
-  const drawSnapshotRef = useRef<LinkPathPoint[]>([]);
   const [tjToDelete, setTjToDelete] = useState<Tj | null>(null);
   const [linkToDelete, setLinkToDelete] = useState<FibreLink | null>(null);
   const [deleting, setDeleting] = useState(false);
@@ -174,6 +194,14 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
     () => links.find((link) => link.id === selectedLinkId) ?? null,
     [links, selectedLinkId],
   );
+  // A fibre connected to the ONU being edited owns its fibre ID, so that field
+  // stays read-only while the cable is attached.
+  const onuFormLinkedFibreId = useMemo(() => {
+    const onuId = onuForm?.onu?.id;
+    if (!onuId) return null;
+    const link = links.find((item) => item.fromOnuId === onuId || item.toOnuId === onuId);
+    return link?.fibreId ?? null;
+  }, [links, onuForm]);
 
   // Camera for the selected area. It is built from the area's own joints, OLTs and ONUs
   // (the network payload is already filtered by area on the server), so opening an
@@ -240,9 +268,11 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
   useEffect(() => {
     function handleKey(event: KeyboardEvent) {
       if (event.key !== 'Escape') return;
-      if (drawingLink) {
-        setLinkPath(drawSnapshotRef.current);
-        setDrawingLink(false);
+      if (mode === 'connect') {
+        setConnectFrom(null);
+        setConnectTarget(null);
+        setConnectBends([]);
+        setMode('idle');
         return;
       }
       if (mode !== 'idle') {
@@ -251,7 +281,7 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
     }
     window.addEventListener('keydown', handleKey);
     return () => window.removeEventListener('keydown', handleKey);
-  }, [mode, drawingLink]);
+  }, [mode]);
 
   useEffect(() => {
     function handleSidebarKey(event: KeyboardEvent) {
@@ -263,6 +293,14 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
     window.addEventListener('keydown', handleSidebarKey);
     return () => window.removeEventListener('keydown', handleSidebarKey);
   }, []);
+
+  // Mirror fresh server payloads into the local state the map renders from.
+  useEffect(() => {
+    setLocalTjs(data?.tjs ?? []);
+    setLocalOlts(data?.olts ?? []);
+    setLocalOnus(data?.onus ?? []);
+    setLinks(data?.links ?? []);
+  }, [data]);
 
   const focusOn = useCallback((tj: Tj) => {
     setFocus({ lng: tj.lng, lat: tj.lat, zoom: 13.4, nonce: Date.now() });
@@ -395,12 +433,65 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
     });
   }, [isAdmin, area]);
 
+  /**
+   * Enter the map connection tool: no dialog, ports are picked in a popover on
+   * each device and clicks on the map draw the cable's polygon route.
+   */
+  const startConnect = useCallback(
+    (ref?: LinkDeviceRef | null) => {
+      if (!isAdmin) {
+        toast.error('Viewer seat', { description: 'Only admins can connect fibre.' });
+        return;
+      }
+      setSelectedTjId(null);
+      setSelectedOltId(null);
+      setSelectedOnuId(null);
+      setSelectedLinkId(null);
+      setConnectFrom(null);
+      setConnectBends([]);
+      setConnectTarget(ref ?? null);
+      setMode('connect');
+      toast.info(ref ? `Connect ${ref.code}` : 'Connect a cable', {
+        description: ref
+          ? 'Pick a free port on this device, then click the far device and pick its port.'
+          : 'Click a device and pick a port, then click the far device. Click empty map to bend the route.',
+      });
+    },
+    [isAdmin],
+  );
+
+  /** Ask which cable construction to build before any port is picked. */
+  const requestLink = useCallback(
+    (ref: LinkDeviceRef | null) => {
+      if (!isAdmin) {
+        toast.error('Viewer seat', { description: 'Only admins can connect fibre.' });
+        return;
+      }
+      setLinkTypePicker({ ref });
+    },
+    [isAdmin],
+  );
+
   const startLinkMode = useCallback(() => {
-    if (!isAdmin) return;
-    const fromRef = selectedOlt ? oltToRef(selectedOlt) : selectedTj ? tjToRef(selectedTj) : null;
-    setLinkDialog({ from: fromRef, to: null, link: null });
+    requestLink(null);
+  }, [requestLink]);
+
+  const chooseLinkType = useCallback(
+    (type: FibreCableType) => {
+      const ref = linkTypePicker?.ref ?? null;
+      setLinkTypePicker(null);
+      setConnectFibreType(type);
+      startConnect(ref);
+    },
+    [linkTypePicker, startConnect],
+  );
+
+  const cancelConnect = useCallback(() => {
     setMode('idle');
-  }, [isAdmin, selectedOlt, selectedTj]);
+    setConnectFrom(null);
+    setConnectTarget(null);
+    setConnectBends([]);
+  }, []);
 
   const cancelMode = useCallback(() => {
     setMode('idle');
@@ -455,61 +546,30 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
     [areaId, tjs, olts, onus, links, mutate],
   );
 
-  // Draw the cable route on the map. The dialog stays mounted (hidden) so the
-  // half-filled link form survives the trip to the map and back.
-  const startLinkDraw = useCallback(() => {
-    drawSnapshotRef.current = linkPath;
-    setLinkPath([]);
-    setDrawingLink(true);
-    toast.info('Draw cable route', {
-      description: 'Click the map to add bends, drag a point to adjust it, double-click to finish.',
-    });
-  }, [linkPath]);
-
-  const cancelLinkDraw = useCallback(() => {
-    setLinkPath(drawSnapshotRef.current);
-    setDrawingLink(false);
-  }, []);
-
-  const finishLinkDraw = useCallback(() => {
-    setDrawingLink(false);
-    toast.success('Route captured', {
-      description:
-        linkPath.length > 0
-          ? `${linkPath.length} bend${linkPath.length === 1 ? '' : 's'} on this link.`
-          : 'No bends drawn — the link will render as a straight line.',
-    });
-  }, [linkPath.length]);
-
-  const handleDrawPoint = useCallback((point: { lat: number; lng: number }) => {
-    setLinkPath((current) => {
-      // A double-click produces two clicks at the same spot; keep one bend.
-      const last = current[current.length - 1];
-      if (last && Math.abs(last.lat - point.lat) < 1e-5 && Math.abs(last.lng - point.lng) < 1e-5) {
-        return current;
-      }
-      return [...current, point];
-    });
-  }, []);
-
-  const handleMoveDrawPoint = useCallback(
-    (index: number, point: { lat: number; lng: number }) => {
-      setLinkPath((current) => current.map((item, i) => (i === index ? point : item)));
-    },
-    [],
-  );
-
   const handleLocationSelect = useCallback(
     (item: SearchResultItem) => {
       setPinnedLocation({ lat: item.lat, lng: item.lng, title: item.title, subtitle: item.subtitle });
+      const isDevice = item.type === 'tj' || item.type === 'olt' || item.type === 'onu';
       setFocus({
         lng: item.lng,
         lat: item.lat,
-        zoom: item.type === 'tj' ? 15 : 14,
+        zoom: isDevice ? 15 : 14,
         nonce: Date.now(),
       });
       if (item.type === 'tj' && item.tjId) {
         setSelectedTjId(item.tjId);
+        setSelectedLinkId(null);
+        setSelectedOltId(null);
+        setSelectedOnuId(null);
+      } else if (item.type === 'olt' && item.oltId) {
+        setSelectedOltId(item.oltId);
+        setSelectedTjId(null);
+        setSelectedLinkId(null);
+        setSelectedOnuId(null);
+      } else if (item.type === 'onu' && item.onuId) {
+        setSelectedOnuId(item.onuId);
+        setSelectedTjId(null);
+        setSelectedOltId(null);
         setSelectedLinkId(null);
       }
     },
@@ -541,8 +601,30 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
     [],
   );
 
+  const handleAddOnuAtPinnedLocation = useCallback(
+    (point: { lat: number; lng: number; address: string }) => {
+      setSelectedOnuId(null);
+      setOnuForm({ onu: null, point: { lat: point.lat, lng: point.lng } });
+      setPinnedLocation(null);
+    },
+    [],
+  );
+
+  /**
+   * Keep the URL on the area a device was just saved into, so reloading the page
+   * reopens that area instead of falling back to the national map.
+   */
+  const focusDeviceArea = useCallback(
+    (deviceAreaId?: string | null) => {
+      if (!deviceAreaId || deviceAreaId === areaId) return;
+      router.push(`/areas/${deviceAreaId}`);
+    },
+    [areaId, router],
+  );
+
   const handleTjSaved = useCallback(
     async (saved: Tj) => {
+      const wasNewJoint = !editingTj;
       setSelectedTjId(saved.id);
       setEditingTj(null);
       setDraftPoint(null);
@@ -564,8 +646,9 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
       }
 
       await mutate();
+      if (wasNewJoint) focusDeviceArea(saved.areaId);
     },
-    [mutate, joinRestoreLink],
+    [mutate, joinRestoreLink, editingTj, focusDeviceArea],
   );
 
   const handleDeviceMove = useCallback(
@@ -576,54 +659,168 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
           : move.kind === 'olt'
             ? olts.find((item) => item.id === move.id)?.code
             : onus.find((item) => item.id === move.id)?.username;
+
+      const endpointFor = (link: FibreLink, side: 'from' | 'to') => {
+        if (side === 'from') {
+          if (link.fromTjId) return { kind: 'tj' as const, id: link.fromTjId };
+          if (link.fromOltId) return { kind: 'olt' as const, id: link.fromOltId };
+          if (link.fromOnuId) return { kind: 'onu' as const, id: link.fromOnuId };
+          return null;
+        }
+        if (link.toTjId) return { kind: 'tj' as const, id: link.toTjId };
+        if (link.toOltId) return { kind: 'olt' as const, id: link.toOltId };
+        if (link.toOnuId) return { kind: 'onu' as const, id: link.toOnuId };
+        return null;
+      };
+
+      // Only the device the user dragged changes place; everything else on the
+      // map stays where it is and its spans are re-terminated onto the new spot.
+      const movedDevices = new Map<
+        string,
+        { kind: DeviceKind; id: string; lat: number; lng: number }
+      >();
+      movedDevices.set(`${move.kind}:${move.id}`, {
+        kind: move.kind,
+        id: move.id,
+        lat: move.lat,
+        lng: move.lng,
+      });
+
+      const movedFor = (link: FibreLink, side: 'from' | 'to') => {
+        const endpoint = endpointFor(link, side);
+        return endpoint ? movedDevices.get(`${endpoint.kind}:${endpoint.id}`) ?? null : null;
+      };
+
+      // Re-anchor a span against the moved endpoint, keeping its drawn bends.
+      const withMovedDevices = (link: FibreLink): FibreLink => {
+        const from = movedFor(link, 'from');
+        const to = movedFor(link, 'to');
+        if (!from && !to) return link;
+        const fromLat = from?.lat ?? link.fromLat;
+        const fromLng = from?.lng ?? link.fromLng;
+        const toLat = to?.lat ?? link.toLat;
+        const toLng = to?.lng ?? link.toLng;
+        const path = link.path;
+        return {
+          ...link,
+          fromLat,
+          fromLng,
+          toLat,
+          toLng,
+          path,
+          lengthM: routeLengthMeters(fromLat, fromLng, toLat, toLng, path),
+        };
+      };
+
+      const previousTjs = tjs;
+      const previousOlts = olts;
+      const previousOnus = onus;
+      const previousLinks = links;
+
+      // Apply the move on screen first; it must never wait on a refetch.
+      setLocalTjs((current) =>
+        current.map((tj) => {
+          const moved = movedDevices.get(`tj:${tj.id}`);
+          return moved ? { ...tj, lat: moved.lat, lng: moved.lng } : tj;
+        }),
+      );
+      setLocalOlts((current) =>
+        current.map((olt) => {
+          const moved = movedDevices.get(`olt:${olt.id}`);
+          return moved ? { ...olt, lat: moved.lat, lng: moved.lng } : olt;
+        }),
+      );
+      setLocalOnus((current) =>
+        current.map((onu) => {
+          const moved = movedDevices.get(`onu:${onu.id}`);
+          return moved ? { ...onu, lat: moved.lat, lng: moved.lng } : onu;
+        }),
+      );
+      const nextLinks = links.map(withMovedDevices);
+      setLinks(nextLinks);
+
       try {
-        if (move.kind === 'tj') {
-          await api.updateTj(move.id, { lat: move.lat, lng: move.lng });
-        } else if (move.kind === 'olt') {
-          await api.updateOlt(move.id, { lat: move.lat, lng: move.lng });
-        } else {
-          await api.updateOnu(move.id, { lat: move.lat, lng: move.lng });
+        // 1. Save the new coordinates for the dragged device and every device
+        //    wired to it, which travelled by the same offset.
+        await Promise.all(
+          [...movedDevices.values()].map((device) =>
+            device.kind === 'tj'
+              ? api.updateTj(device.id, { lat: device.lat, lng: device.lng })
+              : device.kind === 'olt'
+                ? api.updateOlt(device.id, { lat: device.lat, lng: device.lng })
+                : api.updateOnu(device.id, { lat: device.lat, lng: device.lng }),
+          ),
+        );
+
+        // 2. Persist every span whose endpoint moved so the server recomputes and
+        //    stores its fibre length from the new coordinates.
+        const affected = nextLinks.filter(
+          (link) => movedFor(link, 'from') || movedFor(link, 'to'),
+        );
+        const savedLinks = await Promise.all(
+          affected.map((link) => api.updateLink(link.id, { path: link.path })),
+        );
+
+        // Keep the server's recalculated spans (length + endpoint values).
+        if (savedLinks.length > 0) {
+          const savedById = new Map(savedLinks.map((link) => [link.id, link]));
+          setLinks((current) => current.map((item) => savedById.get(item.id) ?? item));
         }
 
-        // Lengths are stored on the link; touching each attached span recomputes
-        // it against the device's new coordinates on the server.
-        const attached = links.filter(
-          (link) =>
-            (move.kind === 'tj' &&
-              (link.fromTjId === move.id || link.toTjId === move.id)) ||
-            (move.kind === 'olt' &&
-              (link.fromOltId === move.id || link.toOltId === move.id)) ||
-            (move.kind === 'onu' &&
-              (link.fromOnuId === move.id || link.toOnuId === move.id)),
-        );
-        await Promise.all(attached.map((link) => api.updateLink(link.id, { path: link.path })));
-
-        await mutate();
         toast.success(`${deviceCode ?? 'Device'} moved`, {
-          description: 'Coordinates and fibre lengths updated.',
+          id: 'device-move',
+          description: `Saved the new position and ${affected.length} fibre length${
+            affected.length === 1 ? '' : 's'
+          }.`,
         });
       } catch (err) {
-        toast.error(err instanceof ApiError ? err.message : 'Could not move this device');
-        await mutate();
+        // Nothing was saved, so put the map back exactly where it was.
+        setLocalTjs(previousTjs);
+        setLocalOlts(previousOlts);
+        setLocalOnus(previousOnus);
+        setLinks(previousLinks);
+        toast.error(err instanceof ApiError ? err.message : 'Could not save this device move');
       }
     },
-    [tjs, olts, onus, links, mutate],
+    [tjs, olts, onus, links],
   );
 
   const handleMoveLinkPath = useCallback(
     async (id: string, path: { lat: number; lng: number }[]) => {
+      const previousLinks = links;
+
+      // Apply the new route and its recomputed length immediately.
+      setLinks((current) =>
+        current.map((link) =>
+          link.id === id
+            ? {
+                ...link,
+                path,
+                lengthM: routeLengthMeters(
+                  link.fromLat,
+                  link.fromLng,
+                  link.toLat,
+                  link.toLng,
+                  path,
+                ),
+              }
+            : link,
+        ),
+      );
+
       try {
         const updated = await api.updateLink(id, { path });
-        await mutate();
+        setLinks((current) => current.map((item) => (item.id === id ? updated : item)));
         toast.success(`Link ${updated.fibreId} rerouted`, {
+          id: 'link-route-move',
           description: `${formatDistance(updated.lengthM)} of fibre.`,
         });
       } catch (err) {
-        toast.error(err instanceof ApiError ? err.message : 'Could not move this link');
-        await mutate();
+        setLinks(previousLinks);
+        toast.error(err instanceof ApiError ? err.message : 'Could not save this route');
       }
     },
-    [mutate],
+    [links],
   );
 
   const handleLinkSaved = useCallback(
@@ -656,23 +853,152 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
           // The link itself is saved; failing to sync the label must not undo it.
         }
       }
+
+      // The cable linked to an ONU is that subscriber's drop fibre, so the ONU
+      // takes the link's fibre ID instead of keeping a stale or blank value.
+      const onuIds = [
+        saved.fromKind === 'onu' ? saved.fromOnuId : null,
+        saved.toKind === 'onu' ? saved.toOnuId : null,
+      ];
+      for (const onuId of onuIds) {
+        if (!onuId) continue;
+        const onu = onus.find((item) => item.id === onuId);
+        if (!onu || onu.fibreId === saved.fibreId) continue;
+        try {
+          await api.updateOnu(onuId, { fibreId: saved.fibreId });
+        } catch {
+          // The link itself is saved; failing to sync the label must not undo it.
+        }
+      }
+
       setSelectedLinkId(saved.id);
       await mutate();
     },
-    [mutate, tjs],
+    [mutate, tjs, onus],
   );
 
-  const handleLinkFrom = useCallback((tj: Tj) => {
-    setLinkDialog({ from: tjToRef(tj), to: null, link: null });
+  /**
+   * Port picked in the connection popover. The first end arms the cable; the
+   * second opens the cable form with both ports filled in, so the fibre ID,
+   * tubes and optical parameters are set before anything is saved.
+   */
+  const handlePickConnectPort = useCallback(
+    (port: string) => {
+      const target = connectTarget;
+      if (!target) return;
+      const targetPorts = devicePorts(target.kind, target.id, { tjs, olts, onus });
+      if (!targetPorts.some((entry) => entry.label === port)) return;
+
+      if (!connectFrom) {
+        setConnectFrom({ ref: target, port });
+        setConnectTarget(null);
+        toast.success(`From ${target.code} · ${port}`, {
+          description: 'Now click the device at the far end and pick its port.',
+        });
+        return;
+      }
+
+      if (connectFrom.ref.kind === target.kind && connectFrom.ref.id === target.id) {
+        setConnectFrom({ ref: target, port });
+        setConnectTarget(null);
+        toast.info(`From port set to ${port}`, { description: 'Now click the far device.' });
+        return;
+      }
+
+      // Both ends are chosen: hand them to the cable form instead of saving now.
+      const fromRef = connectFrom.ref;
+      const fromPort = connectFrom.port;
+      const bends = connectBends;
+      setMode('idle');
+      setConnectFrom(null);
+      setConnectTarget(null);
+      setConnectBends([]);
+      setLinkDialogInitialPath(bends);
+      setLinkDialogPorts({ from: fromPort, to: port });
+      setLinkDialog({ from: fromRef, to: target, link: null });
+      toast.info('Name the new cable', {
+        description: `${fromRef.code} ${fromPort} → ${target.code} ${port}. Set its fibre ID, tubes and optical parameters, then create it.`,
+      });
+    },
+    [connectTarget, connectFrom, connectBends, tjs, olts, onus],
+  );
+
+  const handleLinkFrom = useCallback(
+    (tj: Tj) => {
+      requestLink(tjToRef(tj));
+    },
+    [requestLink],
+  );
+
+  const handleLinkFromOlt = useCallback(
+    (olt: Olt) => {
+      requestLink(oltToRef(olt));
+    },
+    [requestLink],
+  );
+
+  const handleLinkFromOnu = useCallback(
+    (onu: Onu) => {
+      requestLink(onuToRef(onu));
+    },
+    [requestLink],
+  );
+
+  /** Resolve a map marker click back to the device record it stands for. */
+  const deviceRef = useCallback(
+    ({ kind, id }: { kind: DeviceKind; id: string }): LinkDeviceRef | null => {
+      if (kind === 'tj') {
+        const tj = tjs.find((item) => item.id === id);
+        return tj ? tjToRef(tj) : null;
+      }
+      if (kind === 'olt') {
+        const olt = olts.find((item) => item.id === id);
+        return olt ? oltToRef(olt) : null;
+      }
+      const onu = onus.find((item) => item.id === id);
+      return onu ? onuToRef(onu) : null;
+    },
+    [tjs, olts, onus],
+  );
+
+  const handleConnectDevice = useCallback(
+    (device: { kind: DeviceKind; id: string }) => {
+      const ref = deviceRef(device);
+      if (!ref) return;
+      setConnectTarget(ref);
+    },
+    [deviceRef],
+  );
+
+  const connectPorts = useMemo(
+    () =>
+      connectTarget
+        ? devicePorts(connectTarget.kind, connectTarget.id, { tjs, olts, onus })
+        : [],
+    [connectTarget, tjs, olts, onus],
+  );
+
+  const handleConnectBend = useCallback((point: { lat: number; lng: number }) => {
+    setConnectBends((current) => {
+      const last = current[current.length - 1];
+      if (last && Math.abs(last.lat - point.lat) < 1e-5 && Math.abs(last.lng - point.lng) < 1e-5) {
+        return current;
+      }
+      return [...current, point];
+    });
   }, []);
 
-  const handleLinkFromOlt = useCallback((olt: Olt) => {
-    setLinkDialog({ from: oltToRef(olt), to: null, link: null });
-  }, []);
-
-  const handleLinkFromOnu = useCallback((onu: Onu) => {
-    setLinkDialog({ from: onuToRef(onu), to: null, link: null });
-  }, []);
+  const handleConnectMovePoint = useCallback(
+    (index: number, point: { lat: number; lng: number }) => {
+      // Bend 0 is the from-device anchor when the first port is already chosen.
+      const offset = connectFrom ? 1 : 0;
+      if (index < offset) return;
+      setConnectBends((current) =>
+        current.map((item, position) => (position === index - offset ? point : item)),
+      );
+    },
+    [connectFrom],
+  );
 
   async function confirmDeleteTj() {
     if (!tjToDelete) return;
@@ -797,11 +1123,23 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
               onus={onus}
               onSelectOlt={handleSelectOlt}
               onSelectOnu={handleSelectOnu}
-              mode={drawingLink ? 'draw-link' : mode}
-              drawPath={drawingLink ? linkPath : []}
-              onDrawPoint={handleDrawPoint}
-              onMoveDrawPoint={handleMoveDrawPoint}
-              onFinishDraw={finishLinkDraw}
+              mode={mode}
+              drawPath={
+                connecting
+                  ? connectFrom && connectFrom.ref.lat != null && connectFrom.ref.lng != null
+                    ? [{ lat: connectFrom.ref.lat, lng: connectFrom.ref.lng }, ...connectBends]
+                    : connectBends
+                  : []
+              }
+              onDrawPoint={connecting ? handleConnectBend : undefined}
+              onMoveDrawPoint={connecting ? handleConnectMovePoint : undefined}
+              connectTarget={connecting ? connectTarget : null}
+              connectPorts={connecting ? connectPorts : []}
+              onConnectDevice={handleConnectDevice}
+              onPickConnectPort={(port) => {
+                void handlePickConnectPort(port);
+              }}
+              onCancelConnectTarget={() => setConnectTarget(null)}
               selectedTjId={selectedTjId}
               selectedLinkId={selectedLinkId}
               focus={focus}
@@ -817,6 +1155,7 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
               onClearPinnedLocation={handleClearPinnedLocation}
               onAddTjAtPinnedLocation={handleAddTjAtPinnedLocation}
               onAddOltAtPinnedLocation={handleAddOltAtPinnedLocation}
+              onAddOnuAtPinnedLocation={handleAddOnuAtPinnedLocation}
               canMoveDevices={isAdmin}
               onMoveDevice={handleDeviceMove}
               onMoveLinkPath={handleMoveLinkPath}
@@ -824,6 +1163,8 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
 
             <LocationSearch
               tjs={tjs}
+              olts={olts}
+              onus={onus}
               onSelectLocation={handleLocationSelect}
               onClearPinned={handleClearPinnedLocation}
               activePinned={pinnedLocation ? { title: pinnedLocation.title } : null}
@@ -838,19 +1179,22 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
               onCancelMode={cancelMode}
             />
 
-            {drawingLink ? (
+            {connecting ? (
               <div className="pointer-events-none absolute inset-x-0 top-4 z-30 flex justify-center px-4">
                 <div className="pointer-events-auto flex w-full max-w-2xl flex-wrap items-center gap-2 rounded-2xl border border-white/60 bg-background/95 p-2.5 shadow-xl backdrop-blur dark:border-white/10">
                   <span className="grid size-8 shrink-0 place-items-center rounded-xl bg-primary/10 text-primary">
-                    <Route className="size-4" />
+                    <Cable className="size-4" />
                   </span>
                   <div className="min-w-0 flex-1">
                     <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-primary">
-                      Drawing cable route
+                      Connecting cable · {connectFibreType === 'core' ? '12-core' : 'multi-tube'}
                     </p>
                     <p className="text-[10px] text-muted-foreground">
-                      {linkPath.length} bend{linkPath.length === 1 ? '' : 's'} · click the map to add · drag a
-                      point to adjust · double-click to finish
+                      {connectFrom
+                        ? `From ${connectFrom.ref.code} · ${connectFrom.port} — pick the far port to open the cable form.`
+                        : 'Click a device and pick the port to start from.'}{' '}
+                      {connectBends.length} bend{connectBends.length === 1 ? '' : 's'} · click the map to
+                      draw the cable route
                     </p>
                   </div>
                   <div className="flex shrink-0 items-center gap-1">
@@ -858,8 +1202,8 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
                       type="button"
                       size="sm"
                       variant="ghost"
-                      disabled={linkPath.length === 0}
-                      onClick={() => setLinkPath((current) => current.slice(0, -1))}
+                      disabled={connectBends.length === 0}
+                      onClick={() => setConnectBends((current) => current.slice(0, -1))}
                     >
                       <Undo2 className="size-3.5" />
                       Undo
@@ -868,26 +1212,22 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
                       type="button"
                       size="sm"
                       variant="ghost"
-                      disabled={linkPath.length === 0}
-                      onClick={() => setLinkPath([])}
+                      disabled={connectBends.length === 0}
+                      onClick={() => setConnectBends([])}
                     >
                       <Trash2 className="size-3.5" />
                       Clear
                     </Button>
-                    <Button type="button" size="sm" variant="ghost" onClick={cancelLinkDraw}>
+                    <Button type="button" size="sm" variant="ghost" onClick={cancelConnect}>
                       <X className="size-3.5" />
                       Cancel
-                    </Button>
-                    <Button type="button" size="sm" onClick={finishLinkDraw}>
-                      <Check className="size-3.5" />
-                      Done
                     </Button>
                   </div>
                 </div>
               </div>
             ) : null}
 
-            {drawingLink ? null : (
+            {connecting ? null : (
               <MapFab
                 isAdmin={isAdmin}
                 mode={mode}
@@ -1013,10 +1353,16 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
         olt={oltForm?.olt ?? null}
         draftPoint={oltForm?.point ?? null}
         defaultAreaId={areaId ?? null}
+        links={links}
+        onLinksChanged={async () => {
+          await mutate();
+        }}
         onSaved={async (saved) => {
+          const wasNewCabinet = !oltForm?.olt;
           setOltForm(null);
           setSelectedOltId(saved.id);
           await mutate();
+          if (wasNewCabinet) focusDeviceArea(saved.areaId);
         }}
       />
 
@@ -1095,7 +1441,19 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
         tjs={tjs}
         olts={olts}
         links={links}
+        onLinksChanged={async () => {
+          await mutate();
+        }}
         onSaved={handleTjSaved}
+      />
+
+      <LinkTypeDialog
+        open={Boolean(linkTypePicker)}
+        onOpenChange={(open) => {
+          if (!open) setLinkTypePicker(null);
+        }}
+        deviceCode={linkTypePicker?.ref?.code ?? null}
+        onSelect={chooseLinkType}
       />
 
       <LinkDialog
@@ -1103,7 +1461,8 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
         onOpenChange={(open) => {
           if (!open) {
             setLinkDialog(null);
-            setDrawingLink(false);
+            setLinkDialogPorts(null);
+            setLinkDialogInitialPath(null);
             setLinkPath([]);
           }
         }}
@@ -1113,11 +1472,13 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
         links={links}
         from={linkDialog?.from ?? null}
         to={linkDialog?.to ?? null}
+        fromPort={linkDialogPorts?.from ?? null}
+        toPort={linkDialogPorts?.to ?? null}
+        initialPath={linkDialogInitialPath}
+        fibreType={connectFibreType}
         link={linkDialog?.link ?? null}
         path={linkPath}
         onPathChange={setLinkPath}
-        onStartDraw={startLinkDraw}
-        drawing={drawingLink}
         onSaved={handleLinkSaved}
         onRequestDelete={(link) => {
           setLinkDialog(null);
@@ -1159,10 +1520,17 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
         onu={onuForm?.onu ?? null}
         draftPoint={onuForm?.point ?? null}
         defaultAreaId={areaId ?? null}
+        linkedFibreId={onuFormLinkedFibreId}
+        links={links}
+        onLinksChanged={async () => {
+          await mutate();
+        }}
         onSaved={async (saved) => {
+          const wasNewOnu = !onuForm?.onu;
           setOnuForm(null);
           setSelectedOnuId(saved.id);
           await mutate();
+          if (wasNewOnu) focusDeviceArea(saved.areaId);
         }}
       />
 

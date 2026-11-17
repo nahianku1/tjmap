@@ -1,5 +1,5 @@
-import type { FibreLink, Olt, Tj } from './types';
-import { calculateOutputPower } from './optical';
+import type { FibreLink, Olt, Splitter, Tj } from './types';
+import { calculateOutputPower, type SplitRatio } from './optical';
 
 export interface UpstreamPower {
   powerDbm: number;
@@ -63,6 +63,15 @@ export function findLinkedFibreId(
   return fallback;
 }
 
+/** Every working splitter in a joint; it may carry several parallel ones. */
+function enabledSplitters(tj: Tj): (Splitter & { ratio: SplitRatio })[] {
+  const fitted = tj.splitters?.length ? tj.splitters : tj.splitter ? [tj.splitter] : [];
+  return fitted.filter(
+    (splitter): splitter is Splitter & { ratio: SplitRatio } =>
+      Boolean(splitter?.enabled && splitter.ratio),
+  );
+}
+
 function oltPortPower(olt: Olt, coreLabel: string | null): number | null {
   const ports = olt.ponPorts ?? [];
   const label = coreLabel?.trim().toLowerCase();
@@ -82,7 +91,12 @@ function oltPortPower(olt: Olt, coreLabel: string | null): number | null {
 
 function storedCorePower(tj: Tj, coreLabel: string | null): number | null {
   if (!coreLabel) return null;
-  const cores = [...(tj.cores ?? []), ...(tj.outputCores ?? []), ...(tj.splitter?.outputs ?? [])];
+  const cores = [
+    ...(tj.cores ?? []),
+    ...(tj.outputCores ?? []),
+    ...(tj.splitter?.outputs ?? []),
+    ...enabledSplitters(tj).flatMap((splitter) => splitter.outputs ?? []),
+  ];
   const core = cores.find((item) => item.label === coreLabel);
   return core && core.powerDbm !== null && core.powerDbm !== undefined
     ? Number(core.powerDbm)
@@ -107,11 +121,17 @@ function tjCorePower(
   if (visited.has(key)) return null;
   visited.add(key);
 
-  const splitter = tj.splitter;
+  // A joint can carry several splitters, so the core decides which one feeds it:
+  // its own output core wins, otherwise the first splitter whose leg matches.
+  const splitters = enabledSplitters(tj);
+  const splitter =
+    splitters.find((item) => (item.outputs ?? []).some((core) => core.label === coreLabel)) ??
+    splitters[0] ??
+    null;
   const isOutputCore =
-    Boolean(splitter?.enabled) &&
-    Boolean(splitter?.ratio) &&
-    (tj.outputCores ?? []).some((core) => core.label === coreLabel);
+    Boolean(splitter) &&
+    ((tj.outputCores ?? []).some((core) => core.label === coreLabel) ||
+      (splitter?.outputs ?? []).some((core) => core.label === coreLabel));
 
   if (isOutputCore && splitter?.ratio) {
     const inputLabel = splitter.inputCoreLabel ?? null;
@@ -146,10 +166,14 @@ function tjAnyPower(
   if (feed) {
     const input = tjCorePower(tj, feed, tjs, olts, links, visited);
     if (input !== null) {
-      const splitter = tj.splitter;
-      return splitter?.enabled && splitter.ratio
-        ? calculateOutputPower(input, splitter.ratio, 0.2)
-        : input;
+      const feedPower: number = input;
+      // Parallel splitters do not stack: the best fed leg wins rather than the sum.
+      const splitters = enabledSplitters(tj);
+      if (splitters.length === 0) return feedPower;
+      const legs = splitters
+        .map((splitter) => calculateOutputPower(feedPower, splitter.ratio, 0.2))
+        .filter((power): power is number => power !== null);
+      return legs.length > 0 ? Math.max(...legs) : feedPower;
     }
   }
   const storedLeg = [...(tj.outputCores ?? []), ...(tj.splitter?.outputs ?? [])].find(
@@ -283,7 +307,8 @@ export function findUpstreamPower(
 
 /** The core a TJ receives its feed on: the splitter feed core, else its first patched core. */
 export function getTjInputCoreLabel(tj: Tj, links: FibreLink[]): string | null {
-  if (tj.splitter?.enabled && tj.splitter.inputCoreLabel) return tj.splitter.inputCoreLabel;
+  const feed = enabledSplitters(tj).find((splitter) => splitter.inputCoreLabel);
+  if (feed?.inputCoreLabel) return feed.inputCoreLabel;
   for (const link of links) {
     if (link.status !== 'active') continue;
     for (const core of link.cores ?? []) {

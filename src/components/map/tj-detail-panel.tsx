@@ -36,11 +36,12 @@ import {
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Separator } from '@/components/ui/separator';
-import type { FibreLink, Olt, Tj } from '@/lib/types';
+import type { Core, CoreStatus, FibreLink, Olt, Tj } from '@/lib/types';
 import { CorePatchLine, linkPatches, type CorePatch } from '@/components/map/core-patch-line';
 import { cn, formatDistance, totalCores } from '@/lib/utils';
 import { assessOpticalPower, calculateOutputPower, getSplitterLossDb } from '@/lib/optical';
 import { findUpstreamPower, getTjInputCoreLabel } from '@/lib/core-power';
+import { splitterFeedLabels, tjCoreUnavailable } from '@/lib/device-ports';
 
 interface TjDetailPanelProps {
   tj: Tj | null;
@@ -86,14 +87,52 @@ export function TjDetailPanel({
   );
 
   const total = tj ? totalCores(tj) : 0;
+  // A joint can carry several splitters; each has its own feed core and outputs.
+  const fittedSplitters = (
+    tj?.splitters?.length ? tj.splitters : tj?.splitter ? [tj.splitter] : []
+  ).filter((splitter) => splitter?.enabled && splitter.ratio);
   const outputCoresCount =
-    tj?.splitter?.outputs?.reduce((sum, core) => sum + (Number(core.count) || 0), 0) ??
+    (fittedSplitters.length > 0
+      ? fittedSplitters.reduce(
+          (sum, splitter) =>
+            sum +
+            (splitter.outputs ?? []).reduce((legs, core) => legs + (Number(core.count) || 0), 0),
+          0,
+        )
+      : null) ??
     tj?.outputCores?.reduce((sum, core) => sum + (Number(core.count) || 0), 0) ??
     0;
 
   const freeCoresCount =
     tj?.cores?.filter((c) => c.status === 'free').reduce((sum, c) => sum + (Number(c.count) || 0), 0) ?? 0;
-  const inUseCoresCount = total - freeCoresCount;
+
+  // Input cores already shown inside their splitter section are not repeated
+  // in the inventory below; cores of a joint without a splitter stay there.
+  const feeds = tj ? splitterFeedLabels(tj) : new Set<string>();
+  const splitterSections = fittedSplitters.map((splitter, index) => {
+    const feed = splitter.inputCoreLabel ?? null;
+    const feedCore = feed ? tj?.cores.find((core) => core.label === feed) ?? null : null;
+    const stored = splitter.outputs ?? [];
+    const outputs = stored.length > 0 ? stored : index === 0 ? tj?.outputCores ?? [] : [];
+    const feedPower =
+      tj && feed ? findUpstreamPower(tj.id, feed, tjs, olts, links)?.powerDbm ?? null : null;
+    const outPower =
+      feedPower !== null && splitter.ratio
+        ? calculateOutputPower(feedPower, splitter.ratio, 0.2)
+        : null;
+    return { splitter, index, feed, feedCore, outputs, feedPower, outPower };
+  });
+  const splitterFeedSet = new Set(
+    splitterSections
+      .map((section) => section.feed)
+      .filter((label): label is string => Boolean(label)),
+  );
+  const inventoryInputCores =
+    splitterSections.length > 0
+      ? (tj?.cores ?? []).filter((core) => !splitterFeedSet.has(core.label))
+      : tj?.cores ?? [];
+  const inventoryFree = inventoryInputCores.filter((core) => core.status === 'free').length;
+  const inventoryInUse = inventoryInputCores.length - inventoryFree;
 
   // Splitter power calculation. Feed power follows the upstream link instead of a
   // manually entered per-core dBm value.
@@ -314,7 +353,7 @@ export function TjDetailPanel({
                     />
                     <Metric
                       label="Splitter outputs"
-                      value={tj.splitter?.enabled ? `${outputCoresCount}` : '—'}
+                      value={fittedSplitters.length > 0 ? `${outputCoresCount}` : '—'}
                       icon={Split}
                       accent="text-violet-500"
                     />
@@ -323,7 +362,7 @@ export function TjDetailPanel({
               </div>
 
               {/* SPLITTER POWER BUDGET CARD */}
-              {tj.splitter?.enabled ? (
+              {fittedSplitters.length <= 1 && tj.splitter?.enabled ? (
                 <section className="rounded-2xl border border-violet-500/25 bg-violet-500/[0.04] p-3 space-y-2.5">
                   <div className="flex items-center justify-between">
                     <p className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.16em] text-muted-foreground">
@@ -418,132 +457,67 @@ export function TjDetailPanel({
                 </p>
               </div>
 
-              {/* INPUT CORE INVENTORY WITH FREE / IN USE STATUS */}
-              <section>
-                <div className="mb-2 flex items-end justify-between">
-                  <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-muted-foreground">
-                    Input Cores ({inUseCoresCount} In Use · {freeCoresCount} Free)
-                  </p>
-                  <span className="font-mono text-[10px] text-muted-foreground">{total} cores</span>
-                </div>
-                {tj.cores.length === 0 ? (
-                  <p className="rounded-xl border border-dashed border-border px-3 py-4 text-center text-[11px] text-muted-foreground">
-                    No cores recorded for this joint.
-                  </p>
-                ) : (
-                  <div className="space-y-1.5">
-                    {tj.cores.map((core, index) => {
-                      const isFree = core.status === 'free';
-                      const isDamaged = core.status === 'damaged';
-                      const patch = corePatches.get(core.label);
-
-                      return (
-                        <div
-                          key={`${core.label}-${index}`}
-                          className={cn(
-                            'rounded-xl border px-2.5 py-2 transition-colors',
-                            isFree
-                              ? 'border-emerald-500/25 bg-emerald-500/[0.04]'
-                              : isDamaged
-                                ? 'border-rose-500/25 bg-rose-500/[0.04]'
-                                : 'border-white/60 bg-white/45 dark:border-white/10 dark:bg-white/[0.03]',
-                          )}
-                        >
-                          <div className="flex items-center gap-2.5">
-                            <span
-                              className="size-3 shrink-0 rounded-full border border-white/70 shadow-[0_0_10px] dark:border-slate-900"
-                              style={{ backgroundColor: core.color, color: core.color }}
-                            />
-                            <span className="min-w-0 flex-1 truncate text-[11.5px] font-medium">{core.label}</span>
-
-                            {/* Free vs In Use chip */}
-                            <span
-                              className={cn(
-                                'inline-flex items-center rounded-md px-1.5 py-0.5 text-[9.5px] font-semibold',
-                                isFree
-                                  ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300'
-                                  : isDamaged
-                                    ? 'bg-rose-500/15 text-rose-700 dark:text-rose-300'
-                                    : 'bg-sky-500/10 text-sky-700 dark:text-sky-300',
-                              )}
-                            >
-                              {isFree ? 'Free' : isDamaged ? 'Cut' : 'In Use'}
-                            </span>
-
-                            {core.count > 1 ? (
-                              <span className="rounded-md bg-muted px-1.5 py-0.5 font-mono text-[10px] font-semibold text-muted-foreground">
-                                {core.count}×
-                              </span>
-                            ) : null}
-                          </div>
-
-                          {patch ? (
-                            <CorePatchLine
-                              localCode={tj.code}
-                              localCore={core.label}
-                              patch={patch}
-                            />
-                          ) : null}
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </section>
-
-              {/* OUTPUT CORES & USER FIBRES */}
-              {(tj.outputCores?.length || tj.splitter?.outputs?.length) ? (
+              {/* INPUT CORE INVENTORY — splitter feeds are shown in their own section */}
+              {inventoryInputCores.length > 0 || splitterSections.length === 0 ? (
                 <section>
-                  <Separator className="mb-3" />
                   <div className="mb-2 flex items-end justify-between">
-                    <p className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.16em] text-muted-foreground">
-                      <Split className="size-3 text-violet-500" />
-                      Output Cores & User Drops ({outputCoresCount} Cores)
+                    <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-muted-foreground">
+                      {splitterSections.length > 0 ? 'Other input cores' : 'Input Cores'} ({inventoryInUse} In Use ·{' '}
+                      {inventoryFree} Free)
                     </p>
-                    {tj.splitter?.enabled ? <Badge variant="splitter">{tj.splitter.ratio}</Badge> : null}
+                    <span className="font-mono text-[10px] text-muted-foreground">
+                      {splitterSections.length > 0 ? inventoryInputCores.length : total} cores
+                    </span>
                   </div>
-                  <div className="space-y-1.5">
-                    {(tj.outputCores && tj.outputCores.length > 0 ? tj.outputCores : tj.splitter?.outputs ?? []).map(
-                      (core, index) => {
+                  {inventoryInputCores.length === 0 ? (
+                    <p className="rounded-xl border border-dashed border-border px-3 py-4 text-center text-[11px] text-muted-foreground">
+                      No cores recorded for this joint.
+                    </p>
+                  ) : (
+                    <div className="space-y-1.5">
+                      {inventoryInputCores.map((core, index) => {
                         const isFree = core.status === 'free';
+                        const isDamaged = core.status === 'damaged';
                         const patch = corePatches.get(core.label);
-                        const attachedFibres =
-                          tj.userFibres?.filter((uf) => uf.outputCoreLabel === core.label) ?? [];
 
                         return (
                           <div
                             key={`${core.label}-${index}`}
                             className={cn(
-                              'rounded-xl border px-2.5 py-2 text-[11px] space-y-1.5 transition-colors',
-                              !isFree
-                                ? 'border-sky-500/30 bg-sky-500/[0.04]'
-                                : 'border-emerald-500/20 bg-emerald-500/[0.02]',
+                              'rounded-xl border px-2.5 py-2 transition-colors',
+                              isFree
+                                ? 'border-emerald-500/25 bg-emerald-500/[0.04]'
+                                : isDamaged
+                                  ? 'border-rose-500/25 bg-rose-500/[0.04]'
+                                  : 'border-white/60 bg-white/45 dark:border-white/10 dark:bg-white/[0.03]',
                             )}
                           >
-                            <div className="flex items-center gap-2">
-                              <span className="size-2.5 shrink-0 rounded-full" style={{ backgroundColor: core.color }} />
-                              <span className="min-w-0 flex-1 font-semibold truncate">{core.label}</span>
+                            <div className="flex items-center gap-2.5">
+                              <span
+                                className="size-3 shrink-0 rounded-full border border-white/70 shadow-[0_0_10px] dark:border-slate-900"
+                                style={{ backgroundColor: core.color, color: core.color }}
+                              />
+                              <span className="min-w-0 flex-1 truncate text-[11.5px] font-medium">{core.label}</span>
+
+                              {/* Free vs In Use chip */}
                               <span
                                 className={cn(
-                                  'rounded-md px-1.5 py-0.5 text-[9.5px] font-semibold',
+                                  'inline-flex items-center rounded-md px-1.5 py-0.5 text-[9.5px] font-semibold',
                                   isFree
                                     ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300'
-                                    : 'bg-sky-500/15 text-sky-700 dark:text-sky-300',
+                                    : isDamaged
+                                      ? 'bg-rose-500/15 text-rose-700 dark:text-rose-300'
+                                      : 'bg-sky-500/10 text-sky-700 dark:text-sky-300',
                                 )}
                               >
-                                {isFree ? 'Free' : 'In Use'}
+                                {isFree ? 'Free' : isDamaged ? 'Cut' : 'In Use'}
                               </span>
-                              {(() => {
-                                const legPower =
-                                  tj.splitter?.enabled && outputPower !== null
-                                    ? outputPower
-                                    : core.powerDbm;
-                                return legPower !== null && legPower !== undefined ? (
-                                  <span className="font-mono text-[10px] font-semibold text-primary">
-                                    {legPower} dBm
-                                  </span>
-                                ) : null;
-                              })()}
+
+                              {core.count > 1 ? (
+                                <span className="rounded-md bg-muted px-1.5 py-0.5 font-mono text-[10px] font-semibold text-muted-foreground">
+                                  {core.count}×
+                                </span>
+                              ) : null}
                             </div>
 
                             {patch ? (
@@ -553,47 +527,149 @@ export function TjDetailPanel({
                                 patch={patch}
                               />
                             ) : null}
-
-                            {/* Attached User Fibres summary in detail panel */}
-                            {attachedFibres.length > 0 ? (
-                              <div className="pt-1 border-t border-border/40 space-y-1">
-                                {attachedFibres.map((uf) => {
-                                  const splicedCore = uf.cores.find((c) => c.connectedToOutputCore);
-                                  const freeCores = uf.cores.filter((c) => !c.connectedToOutputCore).length;
-
-                                  return (
-                                    <div
-                                      key={uf.id}
-                                      className="flex items-center justify-between text-[10px] bg-background/50 rounded-lg px-2 py-1 border border-border/50"
-                                    >
-                                      <div className="flex items-center gap-1.5">
-                                        <Cable className="size-3 text-sky-500 shrink-0" />
-                                        <span className="font-medium">{uf.label}</span>
-                                        <span className="text-muted-foreground font-mono">({uf.coreCount}F)</span>
-                                      </div>
-                                      {splicedCore ? (
-                                        <span className="flex items-center gap-1 text-sky-600 dark:text-sky-400 font-semibold text-[9.5px]">
-                                          <span
-                                            className="size-2 rounded-full border border-white/60 dark:border-white/20 shrink-0"
-                                            style={{ backgroundColor: splicedCore.color }}
-                                            title={`Core colour: ${splicedCore.color}`}
-                                          />
-                                          ⚡ Spliced: {splicedCore.label}
-                                        </span>
-                                      ) : (
-                                        <span className="text-muted-foreground text-[9px]">
-                                          {freeCores} spare cores (Free)
-                                        </span>
-                                      )}
-                                    </div>
-                                  );
-                                })}
-                              </div>
-                            ) : null}
                           </div>
                         );
-                      },
-                    )}
+                      })}
+                    </div>
+                  )}
+                </section>
+              ) : null}
+
+              {/* SPLITTERS, EACH WITH ITS INPUT CORE AND OUTPUT PORTS */}
+              {splitterSections.length > 0 ? (
+                <section className="space-y-2">
+                  <Separator />
+                  <div className="flex items-end justify-between">
+                    <p className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.16em] text-muted-foreground">
+                      <Split className="size-3 text-violet-500" />
+                      Splitters &amp; Ports ({splitterSections.length})
+                    </p>
+                    <span className="font-mono text-[10px] text-muted-foreground">
+                      {outputCoresCount} outputs
+                    </span>
+                  </div>
+                  {splitterSections.map(({ splitter, index, feed, feedCore, outputs, feedPower, outPower }) => {
+                    const feedPatch = feed ? corePatches.get(feed) : undefined;
+                    // A feed core stays Free until a cable owns it, matching the
+                    // availability rule in the map port picker.
+                    const feedUnavailable = feedCore
+                      ? tjCoreUnavailable(feedCore, feeds)
+                      : Boolean(feedPatch);
+                    const feedStatus: 'free' | 'in_use' | 'damaged' =
+                      feedCore?.status === 'damaged' ? 'damaged' : feedUnavailable ? 'in_use' : 'free';
+                    const lossDb = splitter.ratio ? getSplitterLossDb(splitter.ratio, 0.2) : null;
+
+                    return (
+                      <div
+                        key={`${feed ?? 'splitter'}-${index}`}
+                        className="space-y-1.5 rounded-2xl border border-violet-500/25 bg-violet-500/[0.04] p-2.5"
+                      >
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <p className="text-[10px] font-semibold uppercase tracking-[0.12em]">
+                            Splitter {index + 1}
+                          </p>
+                          {splitter.ratio ? <Badge variant="splitter">{splitter.ratio}</Badge> : null}
+                          {lossDb !== null ? (
+                            <span className="font-mono text-[9.5px] text-muted-foreground">
+                              -{lossDb.toFixed(1)} dB
+                            </span>
+                          ) : null}
+                          <span className="ml-auto font-mono text-[10px] font-semibold text-primary">
+                            {outPower !== null
+                              ? `${outPower} dBm out`
+                              : feedPower === null
+                                ? 'no feed power'
+                                : '—'}
+                          </span>
+                        </div>
+
+                        {/* Feed core: this splitter's one input port */}
+                        <div
+                          className={cn(
+                            'space-y-1 rounded-xl border px-2.5 py-2',
+                            feedStatus === 'free'
+                              ? 'border-emerald-500/25 bg-emerald-500/[0.04]'
+                              : feedStatus === 'damaged'
+                                ? 'border-rose-500/25 bg-rose-500/[0.04]'
+                                : 'border-sky-500/30 bg-sky-500/[0.04]',
+                          )}
+                        >
+                          <div className="flex items-center gap-2">
+                            <span
+                              className={cn(
+                                'size-2.5 shrink-0 rounded-full border border-white/70 dark:border-slate-900',
+                                !feedCore && 'border-dashed border-muted-foreground/50 bg-transparent',
+                              )}
+                              style={feedCore ? { backgroundColor: feedCore.color } : undefined}
+                            />
+                            <span className="min-w-0 flex-1 truncate font-mono text-[11px] font-semibold">
+                              {feed ?? 'No feed core'}
+                            </span>
+                            <span className="rounded px-1 py-0.5 text-[8px] font-semibold uppercase tracking-wide bg-violet-500/15 text-violet-700 dark:text-violet-300">
+                              input core
+                            </span>
+                            <PortStatusChip status={feedStatus} />
+                          </div>
+                          {feedPower !== null ? (
+                            <p className="font-mono text-[9.5px] text-muted-foreground">
+                              Input {feedPower > 0 ? `+${feedPower}` : feedPower} dBm
+                            </p>
+                          ) : null}
+                          {feedPatch && feed ? (
+                            <CorePatchLine localCode={tj.code} localCore={feed} patch={feedPatch} />
+                          ) : null}
+                        </div>
+
+                        <p className="pt-0.5 text-[9px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
+                          Output cores ({outputs.length})
+                        </p>
+                        {outputs.length === 0 ? (
+                          <p className="rounded-xl border border-dashed border-border px-3 py-2 text-center text-[10.5px] text-muted-foreground">
+                            No output legs configured.
+                          </p>
+                        ) : (
+                          <div className="space-y-1.5">
+                            {outputs.map((core, coreIndex) => (
+                              <OutputPortRow
+                                key={`${core.label}-${coreIndex}`}
+                                code={tj.code}
+                                core={core}
+                                patch={corePatches.get(core.label)}
+                                power={outPower !== null ? outPower : core.powerDbm}
+                                userFibres={tj.userFibres}
+                              />
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </section>
+              ) : tj.outputCores?.length || tj.splitter?.outputs?.length ? (
+                /* Joints without an enabled splitter keep a single output list. */
+                <section>
+                  <Separator className="mb-3" />
+                  <div className="mb-2 flex items-end justify-between">
+                    <p className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.16em] text-muted-foreground">
+                      <Split className="size-3 text-violet-500" />
+                      Output Cores &amp; User Drops ({outputCoresCount} Cores)
+                    </p>
+                    {tj.splitter?.enabled ? <Badge variant="splitter">{tj.splitter.ratio}</Badge> : null}
+                  </div>
+                  <div className="space-y-1.5">
+                    {(tj.outputCores && tj.outputCores.length > 0
+                      ? tj.outputCores
+                      : tj.splitter?.outputs ?? []
+                    ).map((core, index) => (
+                      <OutputPortRow
+                        key={`${core.label}-${index}`}
+                        code={tj.code}
+                        core={core}
+                        patch={corePatches.get(core.label)}
+                        power={tj.splitter?.enabled && outputPower !== null ? outputPower : core.powerDbm}
+                        userFibres={tj.userFibres}
+                      />
+                    ))}
                   </div>
                 </section>
               ) : null}
@@ -703,6 +779,100 @@ export function TjDetailPanel({
         ) : null}
       </SheetContent>
     </Sheet>
+  );
+}
+
+function PortStatusChip({ status }: { status: CoreStatus }) {
+  return (
+    <span
+      className={cn(
+        'shrink-0 rounded-md px-1.5 py-0.5 text-[9.5px] font-semibold',
+        status === 'free'
+          ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300'
+          : status === 'damaged'
+            ? 'bg-rose-500/15 text-rose-700 dark:text-rose-300'
+            : status === 'spliced'
+              ? 'bg-violet-500/15 text-violet-700 dark:text-violet-300'
+              : 'bg-sky-500/15 text-sky-700 dark:text-sky-300',
+      )}
+    >
+      {status === 'free' ? 'Free' : status === 'damaged' ? 'Cut' : status === 'spliced' ? 'Spliced' : 'In Use'}
+    </span>
+  );
+}
+
+function OutputPortRow({
+  code,
+  core,
+  patch,
+  power,
+  userFibres,
+}: {
+  code: string;
+  core: Core;
+  patch?: CorePatch;
+  power: number | null | undefined;
+  userFibres: Tj['userFibres'];
+}) {
+  const status = core.status ?? 'free';
+  const attachedFibres = userFibres?.filter((uf) => uf.outputCoreLabel === core.label) ?? [];
+
+  return (
+    <div
+      className={cn(
+        'space-y-1.5 rounded-xl border px-2.5 py-2 text-[11px] transition-colors',
+        status === 'free'
+          ? 'border-emerald-500/20 bg-emerald-500/[0.02]'
+          : status === 'damaged'
+            ? 'border-rose-500/25 bg-rose-500/[0.04]'
+            : 'border-sky-500/30 bg-sky-500/[0.04]',
+      )}
+    >
+      <div className="flex items-center gap-2">
+        <span className="size-2.5 shrink-0 rounded-full" style={{ backgroundColor: core.color }} />
+        <span className="min-w-0 flex-1 truncate font-semibold">{core.label}</span>
+        <PortStatusChip status={status} />
+        {power !== null && power !== undefined ? (
+          <span className="font-mono text-[10px] font-semibold text-primary">{power} dBm</span>
+        ) : null}
+      </div>
+
+      {patch ? <CorePatchLine localCode={code} localCore={core.label} patch={patch} /> : null}
+
+      {attachedFibres.length > 0 ? (
+        <div className="space-y-1 border-t border-border/40 pt-1">
+          {attachedFibres.map((uf) => {
+            const splicedCore = uf.cores.find((c) => c.connectedToOutputCore);
+            const spareCores = uf.cores.filter((c) => !c.connectedToOutputCore).length;
+
+            return (
+              <div
+                key={uf.id}
+                className="flex items-center justify-between rounded-lg border border-border/50 bg-background/50 px-2 py-1 text-[10px]"
+              >
+                <div className="flex items-center gap-1.5">
+                  <Cable className="size-3 shrink-0 text-sky-500" />
+                  <span className="font-medium">{uf.label}</span>
+                  <span className="font-mono text-muted-foreground">({uf.coreCount}F)</span>
+                </div>
+                {splicedCore ? (
+                  <span className="flex items-center gap-1 text-[9.5px] font-semibold text-sky-600 dark:text-sky-400">
+                    <span
+                      className="size-2 shrink-0 rounded-full border border-white/60 dark:border-white/20"
+                      style={{ backgroundColor: splicedCore.color }}
+                      title={`Core colour: ${splicedCore.color}`}
+                    />
+                    ⚡ Spliced: {splicedCore.label}
+                  </span>
+                ) : (
+                  <span className="text-[9px] text-muted-foreground">{spareCores} spare cores (Free)</span>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      ) : null}
+    </div>
   );
 }
 
