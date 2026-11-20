@@ -55,21 +55,32 @@ export function Topbar({
         </Link>
       ) : null}
 
-      {/* Desktop sidebar toggle button */}
+      {/* Inventory toggle: opens the drawer on phones, collapses the rail on desktop */}
       {onToggleSidebar ? (
-        <button
-          type="button"
-          onClick={onToggleSidebar}
-          className="hidden lg:grid size-9 shrink-0 place-items-center rounded-xl border border-white/60 bg-white/50 text-muted-foreground shadow-sm transition hover:border-primary/40 hover:bg-white/80 hover:text-foreground active:scale-95 dark:border-white/10 dark:bg-white/[0.05] dark:hover:bg-white/[0.1]"
-          title={sidebarOpen ? 'Collapse sidebar (Ctrl+B)' : 'Open sidebar (Ctrl+B)'}
-          aria-label={sidebarOpen ? 'Collapse sidebar' : 'Open sidebar'}
-        >
-          {sidebarOpen ? (
-            <PanelLeftClose className="size-4 text-primary" />
-          ) : (
-            <PanelLeftOpen className="size-4 text-muted-foreground" />
-          )}
-        </button>
+        <>
+          <button
+            type="button"
+            onClick={onToggleSidebar}
+            className="grid size-9 shrink-0 place-items-center rounded-xl border border-white/60 bg-white/50 text-muted-foreground shadow-sm transition hover:border-primary/40 hover:bg-white/80 hover:text-foreground active:scale-95 lg:hidden dark:border-white/10 dark:bg-white/[0.05] dark:hover:bg-white/[0.1]"
+            title="Open network inventory"
+            aria-label="Open network inventory"
+          >
+            <PanelLeftOpen className="size-4 text-primary" />
+          </button>
+          <button
+            type="button"
+            onClick={onToggleSidebar}
+            className="hidden size-9 shrink-0 place-items-center rounded-xl border border-white/60 bg-white/50 text-muted-foreground shadow-sm transition hover:border-primary/40 hover:bg-white/80 hover:text-foreground active:scale-95 lg:grid dark:border-white/10 dark:bg-white/[0.05] dark:hover:bg-white/[0.1]"
+            title={sidebarOpen ? 'Collapse sidebar (Ctrl+B)' : 'Open sidebar (Ctrl+B)'}
+            aria-label={sidebarOpen ? 'Collapse sidebar' : 'Open sidebar'}
+          >
+            {sidebarOpen ? (
+              <PanelLeftClose className="size-4 text-primary" />
+            ) : (
+              <PanelLeftOpen className="size-4 text-muted-foreground" />
+            )}
+          </button>
+        </>
       ) : null}
 
       <div className="hidden sm:block">

@@ -5,6 +5,7 @@ import { Loader2, TriangleAlert, User } from 'lucide-react';
 import { toast } from 'sonner';
 import {
   Dialog,
+  DialogBody,
   DialogContent,
   DialogDescription,
   DialogFooter,
@@ -25,8 +26,9 @@ import { Textarea } from '@/components/ui/textarea';
 import { CoreEditor } from '@/components/map/core-editor';
 import { api, ApiError } from '@/lib/api';
 import { ONU_CLASS_OPTIONS, getOnuClassInfo } from '@/lib/optical';
+import { tiaCoreColor, tiaCoreLabel } from '@/lib/fibre-cores';
 import { FibreCorePicker } from '@/components/map/fibre-core-picker';
-import type { Area, Core, FibreLink, Onu, OnuClass, PonType } from '@/lib/types';
+import type { Area, Core, FibreLink, Onu, OnuClass, PonType, SubArea } from '@/lib/types';
 
 interface OnuDialogProps {
   open: boolean;
@@ -44,20 +46,11 @@ interface OnuDialogProps {
   onSaved: (onu: Onu, mode: 'create' | 'update') => void;
 }
 
-const PALETTE = [
-  '#22d3ee',
-  '#34d399',
-  '#a78bfa',
-  '#fbbf24',
-  '#fb7185',
-  '#60a5fa',
-  '#a3e635',
-  '#fb923c',
-];
+const PALETTE = Array.from({ length: 12 }, (_item, index) => tiaCoreColor(index + 1));
 
 function defaultCore(index: number): Core {
   return {
-    label: `Core ${String(index).padStart(2, '0')}`,
+    label: tiaCoreLabel(index),
     color: PALETTE[(index - 1) % PALETTE.length],
     count: 1,
     status: 'free',
@@ -83,12 +76,34 @@ export function OnuDialog({
   const [onuClass, setOnuClass] = useState<OnuClass>('B+');
   const [cores, setCores] = useState<Core[]>([defaultCore(1)]);
   const [areaId, setAreaId] = useState('none');
+  const [subAreaId, setSubAreaId] = useState('none');
   const [lat, setLat] = useState('');
   const [lng, setLng] = useState('');
   const [notes, setNotes] = useState('');
   const [areas, setAreas] = useState<Area[]>([]);
+  const [subAreas, setSubAreas] = useState<SubArea[]>([]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Any close path resets the draft: the next open re-reads the ONU or starts
+  // from a clean form instead of resuming the abandoned one.
+  useEffect(() => {
+    if (open) return;
+    setUsername('');
+    setMacAddress('');
+    setVlanId('');
+    setFibreId('');
+    setPonType('gpon');
+    setOnuClass('B+');
+    setCores([defaultCore(1)]);
+    setAreaId('none');
+    setSubAreaId('none');
+    setLat('');
+    setLng('');
+    setNotes('');
+    setSaving(false);
+    setError(null);
+  }, [open]);
 
   useEffect(() => {
     if (!open) return;
@@ -96,7 +111,7 @@ export function OnuDialog({
     setUsername(onu?.username ?? '');
     setMacAddress(onu?.macAddress ?? '');
     setVlanId(onu?.vlanId != null ? String(onu.vlanId) : '');
-    setFibreId(onu?.fibreId ?? '');
+    setFibreId(linkedFibreId ?? onu?.fibreId ?? '');
     setPonType(onu?.ponType === 'epon' ? 'epon' : 'gpon');
     setOnuClass(getOnuClassInfo(onu?.ponType, onu?.onuClass).onuClass);
     setCores(
@@ -110,6 +125,7 @@ export function OnuDialog({
         : [defaultCore(1)],
     );
     setAreaId(onu ? onu.areaId ?? 'none' : defaultAreaId ?? 'none');
+    setSubAreaId(onu?.subAreaId ?? 'none');
     setLat(onu?.lat != null ? String(onu.lat) : draftPoint ? draftPoint.lat.toFixed(6) : '');
     setLng(onu?.lng != null ? String(onu.lng) : draftPoint ? draftPoint.lng.toFixed(6) : '');
     setNotes(onu?.notes ?? '');
@@ -123,10 +139,18 @@ export function OnuDialog({
       .catch(() => {
         if (!cancelled) setAreas([]);
       });
+    api
+      .subAreas()
+      .then((list) => {
+        if (!cancelled) setSubAreas(list);
+      })
+      .catch(() => {
+        if (!cancelled) setSubAreas([]);
+      });
     return () => {
       cancelled = true;
     };
-  }, [open, onu, draftPoint, defaultAreaId]);
+  }, [open, onu, draftPoint, defaultAreaId, linkedFibreId]);
 
   async function handleSubmit(event: React.FormEvent) {
     event.preventDefault();
@@ -174,6 +198,7 @@ export function OnuDialog({
           status: core.status ?? 'free',
         })),
         areaId: areaId === 'none' ? null : areaId,
+        subAreaId: subAreaValue === 'none' ? null : subAreaValue,
         notes: notes.trim() || undefined,
         ...(lat.trim() && lng.trim() ? { lat: Number(lat), lng: Number(lng) } : {}),
       };
@@ -183,7 +208,7 @@ export function OnuDialog({
       };
       const saved = onu ? await api.updateOnu(onu.id, payloadWithFibre) : await api.createOnu(payloadWithFibre);
       toast.success(onu ? `${saved.username} updated` : `${saved.username} added`, {
-        description: `${saved.fibreId} · ${saved.cores.length} core${
+        description: `${saved.fibreId ?? 'No fibre ID'} · ${saved.cores.length} core${
           saved.cores.length === 1 ? '' : 's'
         }${saved.lat != null ? ' · placed on map' : ''}`,
       });
@@ -196,9 +221,14 @@ export function OnuDialog({
     }
   }
 
+  const areaSubAreas = subAreas.filter((subArea) => subArea.areaId === areaId);
+  const subAreaValue = areaSubAreas.some((subArea) => subArea.id === subAreaId)
+    ? subAreaId
+    : 'none';
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[90vh] max-w-lg overflow-y-auto">
+      <DialogContent className="max-w-lg">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <span className="grid size-8 place-items-center rounded-xl bg-amber-500/15 text-amber-600 dark:text-amber-400">
@@ -216,7 +246,8 @@ export function OnuDialog({
           ) : null}
         </DialogHeader>
 
-        <form onSubmit={handleSubmit} className="space-y-4">
+        <form onSubmit={handleSubmit} className="flex min-h-0 flex-1 flex-col">
+          <DialogBody className="space-y-4">
           <section className="grid gap-3 sm:grid-cols-2">
             <div className="space-y-1.5 sm:col-span-2">
               <Label htmlFor="onu-username">Username</Label>
@@ -263,11 +294,11 @@ export function OnuDialog({
                 className="font-mono text-[12px]"
                 disabled={Boolean(linkedFibreId)}
               />
-              {linkedFibreId ? (
-                <p className="text-[10px] text-muted-foreground">
-                  Taken from the fibre linked to this ONU — remove that link to set it by hand.
-                </p>
-              ) : null}
+              <p className="text-[10px] text-muted-foreground">
+                {linkedFibreId
+                  ? 'Taken from the fibre linked to this ONU — remove that link to set it by hand.'
+                  : 'Optional — filled automatically when a drop cable is linked to this ONU.'}
+              </p>
             </div>
             <div className="space-y-1.5">
               <Label htmlFor="onu-pon-type">PON technology</Label>
@@ -306,7 +337,13 @@ export function OnuDialog({
             </div>
             <div className="space-y-1.5 sm:col-span-2">
               <Label htmlFor="onu-area">Service area</Label>
-              <Select value={areaId} onValueChange={setAreaId}>
+              <Select
+                value={areaId}
+                onValueChange={(value) => {
+                  setAreaId(value);
+                  setSubAreaId('none');
+                }}
+              >
                 <SelectTrigger id="onu-area">
                   <SelectValue placeholder="Unassigned" />
                 </SelectTrigger>
@@ -315,6 +352,28 @@ export function OnuDialog({
                   {areas.map((area) => (
                     <SelectItem key={area.id} value={area.id}>
                       {area.districtName} · {area.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-1.5 sm:col-span-2">
+              <Label htmlFor="onu-sub-area">Sub-area</Label>
+              <Select
+                value={subAreaValue}
+                onValueChange={setSubAreaId}
+                disabled={areaId === 'none' || areaSubAreas.length === 0}
+              >
+                <SelectTrigger id="onu-sub-area">
+                  <SelectValue
+                    placeholder={areaId === 'none' ? 'Pick a service area first' : 'No sub-area'}
+                  />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="none">No sub-area</SelectItem>
+                  {areaSubAreas.map((subArea) => (
+                    <SelectItem key={subArea.id} value={subArea.id}>
+                      {subArea.name}
                     </SelectItem>
                   ))}
                 </SelectContent>
@@ -392,6 +451,7 @@ export function OnuDialog({
               <span>{error}</span>
             </div>
           ) : null}
+          </DialogBody>
 
           <DialogFooter>
             <Button type="button" variant="ghost" onClick={() => onOpenChange(false)} disabled={saving}>

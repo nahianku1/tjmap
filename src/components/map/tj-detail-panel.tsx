@@ -41,7 +41,8 @@ import { CorePatchLine, linkPatches, type CorePatch } from '@/components/map/cor
 import { cn, formatDistance, totalCores } from '@/lib/utils';
 import { assessOpticalPower, calculateOutputPower, getSplitterLossDb } from '@/lib/optical';
 import { findUpstreamPower, getTjInputCoreLabel } from '@/lib/core-power';
-import { splitterFeedLabels, tjCoreUnavailable } from '@/lib/device-ports';
+import { splitterFeedLabels, splitterFeedName, tjCoreUnavailable } from '@/lib/device-ports';
+import { displayCoreLabel } from '@/lib/fibre-cores';
 
 interface TjDetailPanelProps {
   tj: Tj | null;
@@ -417,7 +418,11 @@ export function TjDetailPanel({
                   {tj.splitter.inputCoreLabel ? (
                     <p className="text-[10px] text-muted-foreground flex items-center gap-1.5">
                       <span className="size-1.5 rounded-full bg-violet-500" />
-                      Fed from input core: <strong className="text-foreground">{tj.splitter.inputCoreLabel}</strong>
+                      Fed from input core:{' '}
+                      <strong className="text-foreground">
+                        {splitterFeedName(tj, tj.splitter.inputCoreLabel) ??
+                          displayCoreLabel(tj.splitter.inputCoreLabel)}
+                      </strong>
                     </p>
                   ) : null}
                 </section>
@@ -455,6 +460,15 @@ export function TjDetailPanel({
                   </span>
                   <span className="ml-auto shrink-0 font-mono text-[9px]">WGS 84</span>
                 </p>
+                {tj.subAreaName ? (
+                  <p className="mt-1.5 flex items-center gap-1.5 text-[10px] text-muted-foreground">
+                    <Layers className="size-3 text-teal-500" />
+                    <span className="shrink-0">Sub-area</span>
+                    <span className="ml-auto min-w-0 truncate font-semibold text-primary/90">
+                      {tj.subAreaName}
+                    </span>
+                  </p>
+                ) : null}
               </div>
 
               {/* INPUT CORE INVENTORY — splitter feeds are shown in their own section */}
@@ -497,7 +511,9 @@ export function TjDetailPanel({
                                 className="size-3 shrink-0 rounded-full border border-white/70 shadow-[0_0_10px] dark:border-slate-900"
                                 style={{ backgroundColor: core.color, color: core.color }}
                               />
-                              <span className="min-w-0 flex-1 truncate text-[11.5px] font-medium">{core.label}</span>
+                              <span className="min-w-0 flex-1 truncate text-[11.5px] font-medium">
+                                {displayCoreLabel(core.label, index + 1)}
+                              </span>
 
                               {/* Free vs In Use chip */}
                               <span
@@ -595,15 +611,8 @@ export function TjDetailPanel({
                           )}
                         >
                           <div className="flex items-center gap-2">
-                            <span
-                              className={cn(
-                                'size-2.5 shrink-0 rounded-full border border-white/70 dark:border-slate-900',
-                                !feedCore && 'border-dashed border-muted-foreground/50 bg-transparent',
-                              )}
-                              style={feedCore ? { backgroundColor: feedCore.color } : undefined}
-                            />
                             <span className="min-w-0 flex-1 truncate font-mono text-[11px] font-semibold">
-                              {feed ?? 'No feed core'}
+                              {feed ? `S${index + 1}` : 'No feed core'}
                             </span>
                             <span className="rounded px-1 py-0.5 text-[8px] font-semibold uppercase tracking-wide bg-violet-500/15 text-violet-700 dark:text-violet-300">
                               input core
@@ -616,7 +625,12 @@ export function TjDetailPanel({
                             </p>
                           ) : null}
                           {feedPatch && feed ? (
-                            <CorePatchLine localCode={tj.code} localCore={feed} patch={feedPatch} />
+                            <CorePatchLine
+                              localCode={tj.code}
+                              localCore={feed}
+                              localName={`S${index + 1}`}
+                              patch={feedPatch}
+                            />
                           ) : null}
                         </div>
 
@@ -634,6 +648,7 @@ export function TjDetailPanel({
                                 key={`${core.label}-${coreIndex}`}
                                 code={tj.code}
                                 core={core}
+                                index={coreIndex}
                                 patch={corePatches.get(core.label)}
                                 power={outPower !== null ? outPower : core.powerDbm}
                                 userFibres={tj.userFibres}
@@ -665,6 +680,7 @@ export function TjDetailPanel({
                         key={`${core.label}-${index}`}
                         code={tj.code}
                         core={core}
+                        index={index}
                         patch={corePatches.get(core.label)}
                         power={tj.splitter?.enabled && outputPower !== null ? outputPower : core.powerDbm}
                         userFibres={tj.userFibres}
@@ -804,12 +820,14 @@ function PortStatusChip({ status }: { status: CoreStatus }) {
 function OutputPortRow({
   code,
   core,
+  index,
   patch,
   power,
   userFibres,
 }: {
   code: string;
   core: Core;
+  index: number;
   patch?: CorePatch;
   power: number | null | undefined;
   userFibres: Tj['userFibres'];
@@ -830,7 +848,9 @@ function OutputPortRow({
     >
       <div className="flex items-center gap-2">
         <span className="size-2.5 shrink-0 rounded-full" style={{ backgroundColor: core.color }} />
-        <span className="min-w-0 flex-1 truncate font-semibold">{core.label}</span>
+        <span className="min-w-0 flex-1 truncate font-semibold">
+          {displayCoreLabel(core.label, index + 1)}
+        </span>
         <PortStatusChip status={status} />
         {power !== null && power !== undefined ? (
           <span className="font-mono text-[10px] font-semibold text-primary">{power} dBm</span>
@@ -862,7 +882,7 @@ function OutputPortRow({
                       style={{ backgroundColor: splicedCore.color }}
                       title={`Core colour: ${splicedCore.color}`}
                     />
-                    ⚡ Spliced: {splicedCore.label}
+                    ⚡ Spliced: {displayCoreLabel(splicedCore.label, splicedCore.coreIndex)}
                   </span>
                 ) : (
                   <span className="text-[9px] text-muted-foreground">{spareCores} spare cores (Free)</span>

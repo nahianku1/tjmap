@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import { CheckCircle2, Loader2, Scissors, TriangleAlert } from 'lucide-react';
 import { toast } from 'sonner';
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
@@ -23,6 +23,15 @@ export function CutDialog({ tj, open, onOpenChange, onSaved }: CutDialogProps) {
   const [severity, setSeverity] = useState<CutSeverity>('major');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Cancelling a cut report clears it; reopening starts from the joint's data.
+  useEffect(() => {
+    if (open) return;
+    setReason('');
+    setSeverity('major');
+    setSaving(false);
+    setError(null);
+  }, [open]);
 
   useEffect(() => {
     if (!open || !tj) return;
@@ -68,7 +77,7 @@ export function CutDialog({ tj, open, onOpenChange, onSaved }: CutDialogProps) {
           </DialogDescription>
         </DialogHeader>
 
-        <div className="space-y-4">
+        <DialogBody className="space-y-4">
           <div className="space-y-2">
             <Label htmlFor="severity">Severity</Label>
             <Select value={severity} onValueChange={(value) => setSeverity(value as CutSeverity)}>
@@ -99,7 +108,7 @@ export function CutDialog({ tj, open, onOpenChange, onSaved }: CutDialogProps) {
               <span>{error}</span>
             </div>
           ) : null}
-        </div>
+        </DialogBody>
 
         <DialogFooter className="sm:justify-between">
           {tj?.isCut ? (

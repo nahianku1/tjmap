@@ -1,4 +1,5 @@
 import { api } from './api';
+import { tiaCoreColor, tiaCoreLabel } from './fibre-cores';
 import type { DeviceKind, FibreLink, Network, Olt, Onu, Tj } from './types';
 
 export const MAP_TRANSFER_FORMAT = 'isp-tj-map';
@@ -11,6 +12,9 @@ export interface MapTransferFile {
   exportedAt: string;
   areaId: string | null;
   areaName: string | null;
+  /** Set when the snapshot covers one sub-area instead of the whole map. */
+  subAreaId: string | null;
+  subAreaName: string | null;
   olts: Olt[];
   tjs: Tj[];
   onus: Onu[];
@@ -32,6 +36,13 @@ export interface MapImportOptions {
   replaceExisting?: boolean;
   /** Devices currently displayed on the map; removed first when replacing. */
   current?: { tjs: Tj[]; olts: Olt[]; onus?: Onu[]; links?: FibreLink[] };
+  /** Sub-area receiving the snapshot; the file must belong to it. */
+  targetSubAreaId?: string | null;
+  /**
+   * Mapping of file device ids to created ids, shared across several imports so
+   * links can reach devices created by an earlier call (e.g. other KMZ layers).
+   */
+  sharedIdMap?: Map<string, string>;
 }
 
 /** Builds the export payload from the network already loaded on the map. */
@@ -45,10 +56,33 @@ export function createMapTransfer(
     exportedAt: new Date().toISOString(),
     areaId: area?.id ?? null,
     areaName: area?.name ?? null,
+    subAreaId: null,
+    subAreaName: null,
     olts: network.olts,
     tjs: network.tjs,
     onus: network.onus ?? [],
     links: network.links,
+  };
+}
+
+/** Snapshot of only the devices and links filed under one sub-area. */
+export function createSubAreaTransfer(
+  network: Pick<Network, 'olts' | 'tjs' | 'links'> & { onus?: Onu[] },
+  area: { id: string; name: string } | null,
+  subArea: { id: string; name: string },
+): MapTransferFile {
+  return {
+    format: MAP_TRANSFER_FORMAT,
+    version: MAP_TRANSFER_VERSION,
+    exportedAt: new Date().toISOString(),
+    areaId: area?.id ?? null,
+    areaName: area?.name ?? null,
+    subAreaId: subArea.id,
+    subAreaName: subArea.name,
+    olts: network.olts.filter((olt) => olt.subAreaId === subArea.id),
+    tjs: network.tjs.filter((tj) => tj.subAreaId === subArea.id),
+    onus: (network.onus ?? []).filter((onu) => onu.subAreaId === subArea.id),
+    links: network.links.filter((link) => link.subAreaId === subArea.id),
   };
 }
 
@@ -144,8 +178,8 @@ export function parseMapTransferFile(text: string): MapTransferFile {
   }) as unknown as Tj[];
 
   const onus = assertEntries(file.onus, 'ONU', (entry) => {
-    if (!hasString(entry, 'id') || !hasString(entry, 'username') || !hasString(entry, 'fibreId')) {
-      throw new Error('An ONU in this file is missing its id, username or fibre ID.');
+    if (!hasString(entry, 'id') || !hasString(entry, 'username')) {
+      throw new Error('An ONU in this file is missing its id or username.');
     }
   }) as unknown as Onu[];
 
@@ -161,6 +195,8 @@ export function parseMapTransferFile(text: string): MapTransferFile {
     exportedAt: typeof file.exportedAt === 'string' ? file.exportedAt : '',
     areaId: typeof file.areaId === 'string' ? file.areaId : null,
     areaName: typeof file.areaName === 'string' ? file.areaName : null,
+    subAreaId: typeof file.subAreaId === 'string' ? file.subAreaId : null,
+    subAreaName: typeof file.subAreaName === 'string' ? file.subAreaName : null,
     olts,
     tjs,
     onus,
@@ -215,6 +251,15 @@ export async function importMapTransfer(
     );
   }
 
+  const targetSubAreaId = options.targetSubAreaId ?? null;
+  if ((file.subAreaId ?? null) !== targetSubAreaId) {
+    throw new Error(
+      targetSubAreaId
+        ? `This file belongs to ${file.subAreaName ? `sub-area ${file.subAreaName}` : 'another sub-area'} and can only be imported there.`
+        : `This file belongs to sub-area ${file.subAreaName ?? 'another sub-area'}. Open that sub-area and import it there.`,
+    );
+  }
+
   const current = options.current ?? { tjs: existing.tjs, olts: existing.olts };
   const replacing = options.replaceExisting === true;
   // In replace mode the current map's own codes are freed by the deletion below.
@@ -237,12 +282,18 @@ export async function importMapTransfer(
   );
 
   /** Keeps the code/name when free, otherwise appends 2, 3, … until it is. */
-  function uniqueValue(base: string, used: Set<string>, style: 'code' | 'name'): string {
-    const clean = base.trim();
+  function uniqueValue(
+    base: string,
+    used: Set<string>,
+    style: 'code' | 'name',
+    maxLength = 80,
+  ): string {
+    const clean = base.trim().slice(0, maxLength);
     let candidate = clean;
     let suffix = 2;
     while (used.has(candidate.toLowerCase())) {
-      candidate = style === 'code' ? `${clean}-${suffix}` : `${clean} (${suffix})`;
+      const marker = style === 'code' ? `-${suffix}` : ` (${suffix})`;
+      candidate = `${clean.slice(0, maxLength - marker.length)}${marker}`;
       suffix += 1;
     }
     used.add(candidate.toLowerCase());
@@ -271,11 +322,11 @@ export async function importMapTransfer(
     }
   }
 
-  const idMap = new Map<string, string>();
+  const idMap = options.sharedIdMap ?? new Map<string, string>();
 
   for (const olt of file.olts) {
-    const code = uniqueValue(olt.code, usedOltCodes, 'code');
-    const name = uniqueValue(olt.name, usedOltNames, 'name');
+    const code = uniqueValue(olt.code, usedOltCodes, 'code', 40);
+    const name = uniqueValue(olt.name, usedOltNames, 'name', 80);
     if (code !== olt.code.trim() || name !== olt.name.trim()) renamed += 1;
     onProgress?.(`Creating OLT ${code}…`);
     const created = await api.createOlt({
@@ -285,6 +336,7 @@ export async function importMapTransfer(
       uplinkPort: olt.uplinkPort ?? undefined,
       ponPorts: olt.ponPorts?.map((port) => ({
         label: port.label,
+        name: port.name ?? null,
         outputDbm: port.outputDbm,
         vlanId: port.vlanId ?? null,
       })),
@@ -294,6 +346,7 @@ export async function importMapTransfer(
         vlanId: port.vlanId ?? null,
       })),
       areaId: targetAreaId,
+      subAreaId: targetSubAreaId,
       lat: olt.lat ?? undefined,
       lng: olt.lng ?? undefined,
       notes: olt.notes ?? undefined,
@@ -302,7 +355,7 @@ export async function importMapTransfer(
   }
 
   for (const tj of file.tjs) {
-    const code = uniqueValue(tj.code, usedTjCodes, 'code');
+    const code = uniqueValue(tj.code, usedTjCodes, 'code', 40);
     if (code !== tj.code.trim()) renamed += 1;
     onProgress?.(`Creating joint ${code}…`);
     const created = await api.createTj({
@@ -334,6 +387,7 @@ export async function importMapTransfer(
       cutData: tj.cutData ?? null,
       ponData: tj.ponData ?? null,
       areaId: targetAreaId,
+      subAreaId: targetSubAreaId,
       oltId: tj.oltId ? idMap.get(`olt:${tj.oltId}`) ?? null : null,
     });
     idMap.set(`tj:${tj.id}`, created.id);
@@ -349,11 +403,12 @@ export async function importMapTransfer(
       ponType: onu.ponType,
       onuClass: onu.onuClass,
       cores: (onu.cores ?? []).map((core, index) => ({
-        label: core.label || `Core ${index + 1}`,
-        color: core.color || '#22d3ee',
+        label: core.label || tiaCoreLabel(index + 1),
+        color: core.color || tiaCoreColor(index + 1),
         status: core.status ?? 'free',
       })),
       areaId: targetAreaId,
+      subAreaId: targetSubAreaId,
       lat: onu.lat ?? undefined,
       lng: onu.lng ?? undefined,
       notes: onu.notes ?? undefined,
@@ -383,6 +438,7 @@ export async function importMapTransfer(
       toCoreLabel: link.toCoreLabel ?? null,
       coreCount: link.coreCount ?? link.cores?.length ?? 0,
       status: link.status ?? 'active',
+      subAreaId: targetSubAreaId,
       notes: link.notes ?? undefined,
       attenuationDbPerKm: link.attenuationDbPerKm ?? 0.35,
       spliceCount: link.spliceCount ?? 2,
@@ -390,8 +446,8 @@ export async function importMapTransfer(
       color: link.color ?? null,
       cores: (link.cores ?? []).map((core, index) => ({
         index: core.index ?? index + 1,
-        label: core.label || `Core ${index + 1}`,
-        color: core.color || '#22d3ee',
+        label: core.label || tiaCoreLabel(index + 1),
+        color: core.color || tiaCoreColor(index + 1),
         fromCoreLabel: core.fromCoreLabel ?? null,
         toCoreLabel: core.toCoreLabel ?? null,
       })),

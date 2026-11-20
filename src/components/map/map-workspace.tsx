@@ -4,7 +4,7 @@ import dynamic from 'next/dynamic';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import useSWR from 'swr';
-import { Cable, Loader2, RefreshCw, Trash2, Undo2, WifiOff, X } from 'lucide-react';
+import { Cable, CheckCheck, CheckSquare, Loader2, RefreshCw, RotateCcw, Route, Trash2, Undo2, WifiOff, X } from 'lucide-react';
 import { toast } from 'sonner';
 import { Topbar } from '@/components/dashboard/topbar';
 import { Sidebar, type DeviceFilter } from '@/components/dashboard/sidebar';
@@ -23,6 +23,7 @@ import { ConfirmDialog } from '@/components/map/confirm-dialog';
 import { LocationSearch } from '@/components/map/location-search';
 import { MapTransferDialog } from '@/components/map/map-transfer-dialog';
 import { MapExportDialog } from '@/components/map/map-export-dialog';
+import { SubAreaDialog } from '@/components/directory/sub-area-dialog';
 
 import { Button } from '@/components/ui/button';
 import { BrandMark } from '@/components/brand';
@@ -37,21 +38,32 @@ import type {
   Network,
   Olt,
   Onu,
+  SubArea,
   Tj,
 } from '@/lib/types';
-import type { MapMode } from '@/components/map/network-map';
+import type { MapMode, MapRouteOverlay } from '@/components/map/network-map';
+import { RoutePanel, type RouteEndpoint, type RouteTarget } from '@/components/map/route-panel';
+import {
+  buildRouteNodes,
+  findShortestRoute,
+  nearestRouteNode,
+  routeKey,
+  type RouteNode,
+} from '@/lib/route-graph';
+import { useStreetApproach, type StreetState } from '@/lib/street-route';
 import type { SearchResultItem } from '@/lib/geocoding';
 import {
   createMapTransfer,
+  createSubAreaTransfer,
   downloadMapTransfer,
   importMapTransfer,
   mapTransferFilename,
-  type MapTransferFile,
 } from '@/lib/map-transfer';
+import type { KmzImportPayload } from '@/lib/kmz';
 import { cn, formatDistance } from '@/lib/utils';
 import { routeLengthMeters } from '@/lib/route';
 import { devicePorts } from '@/lib/device-ports';
-import type { FibreCableType } from '@/lib/fibre-cores';
+import { tiaCoreColor, tiaCoreLabel, type FibreCableType } from '@/lib/fibre-cores';
 
 const NetworkMap = dynamic(
   () => import('@/components/map/network-map').then((module) => ({ default: module.NetworkMap })),
@@ -59,6 +71,18 @@ const NetworkMap = dynamic(
 );
 
 const fetchNetwork = (path: string) => fetcher<Network>(path);
+
+/** A route endpoint resolved to its graph node (devices) or nearest node (free points). */
+type RouteAnchor = {
+  key: string;
+  snapped: { node: RouteNode; distanceM: number } | null;
+};
+
+function snappedAnchorPoint(anchor: RouteAnchor | null): { lat: number; lng: number } | null {
+  const node = anchor?.snapped?.node;
+  if (!node || node.lat === null || node.lng === null) return null;
+  return { lat: node.lat, lng: node.lng };
+}
 
 interface LinkDialogState {
   from: LinkDeviceRef | null;
@@ -81,11 +105,18 @@ function oltToRef(olt: Olt): LinkDeviceRef {
   };
 }
 
+/** Fits a KML folder name into the sub-area name field (2–60 characters). */
+function layerSubAreaName(raw: string): string {
+  const clean = raw.replace(/\s+/g, ' ').trim();
+  const name = clean.length >= 2 ? clean : `${clean || 'KMZ'} layer`;
+  return name.slice(0, 60);
+}
+
 function onuToRef(onu: Onu): LinkDeviceRef {
   return {
     kind: 'onu',
     id: onu.id,
-    code: onu.fibreId,
+    code: onu.fibreId ?? onu.username,
     name: onu.username,
     lat: onu.lat ?? undefined,
     lng: onu.lng ?? undefined,
@@ -139,6 +170,10 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
   const [filter, setFilter] = useState<DeviceFilter>('all');
   const [search, setSearch] = useState('');
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+  const [subAreaDialogOpen, setSubAreaDialogOpen] = useState(false);
+  // Sub-area layers unchecked in the sidebar disappear from the map.
+  const [hiddenSubAreaIds, setHiddenSubAreaIds] = useState<string[]>([]);
 
   const [tjFormOpen, setTjFormOpen] = useState(false);
   const [editingTj, setEditingTj] = useState<Tj | null>(null);
@@ -158,6 +193,7 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
     lng: number;
     title: string;
     subtitle?: string;
+    pinOnly?: boolean;
   } | null>(null);
   const [linkDialog, setLinkDialog] = useState<LinkDialogState | null>(null);
   // Map connection tool: click device → pick port → click far device → pick port.
@@ -174,9 +210,149 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
   const [linkPath, setLinkPath] = useState<LinkPathPoint[]>([]);
   const [tjToDelete, setTjToDelete] = useState<Tj | null>(null);
   const [linkToDelete, setLinkToDelete] = useState<FibreLink | null>(null);
+  const [selectedDevices, setSelectedDevices] = useState<
+    Map<string, { kind: 'tj' | 'olt' | 'onu'; id: string }>
+  >(new Map());
+  const [bulkDeleteOpen, setBulkDeleteOpen] = useState(false);
+  const [bulkDeleting, setBulkDeleting] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [transferOpen, setTransferOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
+  /** Per-sub-area actions from the inventory cards. */
+  const [subAreaForm, setSubAreaForm] = useState<SubArea | null>(null);
+  const [subAreaToDelete, setSubAreaToDelete] = useState<SubArea | null>(null);
+  const [deletingSubArea, setDeletingSubArea] = useState(false);
+  const [subAreaExport, setSubAreaExport] = useState<SubArea | null>(null);
+  const [subAreaImport, setSubAreaImport] = useState<SubArea | null>(null);
+
+  // Shortest-route planner: two endpoints (device or free map point), the cable
+  // path between their snapped nodes and an optional street leg at either end.
+  const [routeOpen, setRouteOpen] = useState(false);
+  const [routeStart, setRouteStart] = useState<RouteTarget | null>(null);
+  const [routeTarget, setRouteTarget] = useState<RouteTarget | null>(null);
+  const [routePicking, setRoutePicking] = useState<RouteEndpoint | null>(null);
+  const [routeStreetEnabled, setRouteStreetEnabled] = useState(true);
+
+  const routeNodes = useMemo(() => buildRouteNodes(tjs, olts, onus), [tjs, olts, onus]);
+  const routeOrigin = useMemo<RouteAnchor | null>(() => {
+    if (!routeStart) return null;
+    if (routeStart.kind === 'device') return { key: routeStart.key, snapped: null };
+    const snapped = nearestRouteNode(routeStart.lat, routeStart.lng, routeNodes);
+    return snapped ? { key: snapped.node.key, snapped } : null;
+  }, [routeStart, routeNodes]);
+  const routeDestination = useMemo<RouteAnchor | null>(() => {
+    if (!routeTarget) return null;
+    if (routeTarget.kind === 'device') return { key: routeTarget.key, snapped: null };
+    const snapped = nearestRouteNode(routeTarget.lat, routeTarget.lng, routeNodes);
+    return snapped ? { key: snapped.node.key, snapped } : null;
+  }, [routeTarget, routeNodes]);
+  const route = useMemo(() => {
+    if (!routeOrigin || !routeDestination) return null;
+    // Prefer a healthy path; fall back to spans marked as cut so the planner
+    // still explains how the target could be reached.
+    return (
+      findShortestRoute(routeOrigin.key, routeDestination.key, routeNodes, tjs, links) ??
+      findShortestRoute(routeOrigin.key, routeDestination.key, routeNodes, tjs, links, {
+        allowCut: true,
+      })
+    );
+  }, [routeOrigin, routeDestination, routeNodes, tjs, links]);
+
+  const routeStartPoint = routeStart?.kind === 'point' ? routeStart : null;
+  const routeTargetPoint = routeTarget?.kind === 'point' ? routeTarget : null;
+  const routeStartStreet = useStreetApproach(
+    routeOpen && routeStreetEnabled,
+    routeStartPoint,
+    snappedAnchorPoint(routeOrigin),
+  );
+  const routeTargetStreet = useStreetApproach(
+    routeOpen && routeStreetEnabled,
+    routeTargetPoint,
+    snappedAnchorPoint(routeDestination),
+  );
+
+  const routeOverlay = useMemo<MapRouteOverlay | null>(() => {
+    if (!route) return null;
+    const drops: { coordinates: [number, number][] }[] = [];
+    const addDrop = (
+      point: { lat: number; lng: number } | null,
+      anchor: RouteAnchor | null,
+      street: StreetState,
+    ) => {
+      const node = anchor?.snapped?.node;
+      if (!point || !node || node.lat === null || node.lng === null) return;
+      drops.push({
+        coordinates:
+          street.status === 'ready' && street.coordinates
+            ? street.coordinates
+            : [
+                [node.lng, node.lat],
+                [point.lng, point.lat],
+              ],
+      });
+    };
+    addDrop(routeStartPoint, routeOrigin, routeStartStreet);
+    addDrop(routeTargetPoint, routeDestination, routeTargetStreet);
+    return {
+      linkIds: route.hops.map((hop) => hop.link.id),
+      drops,
+      start: routeStartPoint
+        ? { lat: routeStartPoint.lat, lng: routeStartPoint.lng, label: routeStartPoint.label }
+        : null,
+      target: routeTargetPoint
+        ? { lat: routeTargetPoint.lat, lng: routeTargetPoint.lng, label: routeTargetPoint.label }
+        : null,
+      signature: `${route.nodes.map((node) => node.key).join('>')}|${
+        routeStartPoint ? `${routeStartPoint.lat},${routeStartPoint.lng}` : 'device'
+      }|${routeTargetPoint ? `${routeTargetPoint.lat},${routeTargetPoint.lng}` : 'device'}|${
+        routeStartStreet.status
+      }:${routeStartStreet.distanceM ?? 0}|${routeTargetStreet.status}:${
+        routeTargetStreet.distanceM ?? 0
+      }`,
+    };
+  }, [route, routeStartPoint, routeTargetPoint, routeOrigin, routeDestination, routeStartStreet, routeTargetStreet]);
+
+  const closeRoute = useCallback(() => {
+    setRouteOpen(false);
+    setRoutePicking(null);
+    if (mode === 'route') setMode('idle');
+  }, [mode]);
+
+  const toggleRoute = useCallback(() => {
+    if (routeOpen) {
+      closeRoute();
+      return;
+    }
+    setSelectedTjId(null);
+    setSelectedLinkId(null);
+    setSelectedOltId(null);
+    setSelectedOnuId(null);
+    setPinnedLocation(null);
+    setRouteOpen(true);
+  }, [routeOpen, closeRoute]);
+
+  const toggleRoutePicking = useCallback(
+    (which: RouteEndpoint) => {
+      const next = routePicking === which ? null : which;
+      setRoutePicking(next);
+      setMode(next ? 'route' : 'idle');
+    },
+    [routePicking],
+  );
+
+  const handleRouteDevice = useCallback(
+    (device: { kind: DeviceKind; id: string }) => {
+      const key = routeKey(device.kind, device.id);
+      if (!routeStart || routePicking === 'start') {
+        setRouteStart({ kind: 'device', key });
+      } else {
+        setRouteTarget({ kind: 'device', key });
+      }
+      setRoutePicking(null);
+      setMode('idle');
+    },
+    [routeStart, routePicking],
+  );
 
   const selectedTj = useMemo(
     () => tjs.find((tj) => tj.id === selectedTjId) ?? null,
@@ -202,6 +378,81 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
     const link = links.find((item) => item.fromOnuId === onuId || item.toOnuId === onuId);
     return link?.fibreId ?? null;
   }, [links, onuForm]);
+
+  // Layer visibility: devices and links filed under a hidden sub-area are not
+  // drawn on the map. Unassigned items always stay visible.
+  const hiddenSubAreaSet = useMemo(() => new Set(hiddenSubAreaIds), [hiddenSubAreaIds]);
+  const visibleTjs = useMemo(
+    () =>
+      hiddenSubAreaSet.size === 0
+        ? tjs
+        : tjs.filter((tj) => !tj.subAreaId || !hiddenSubAreaSet.has(tj.subAreaId)),
+    [tjs, hiddenSubAreaSet],
+  );
+  const visibleOlts = useMemo(
+    () =>
+      hiddenSubAreaSet.size === 0
+        ? olts
+        : olts.filter((olt) => !olt.subAreaId || !hiddenSubAreaSet.has(olt.subAreaId)),
+    [olts, hiddenSubAreaSet],
+  );
+  const visibleOnus = useMemo(
+    () =>
+      hiddenSubAreaSet.size === 0
+        ? onus
+        : onus.filter((onu) => !onu.subAreaId || !hiddenSubAreaSet.has(onu.subAreaId)),
+    [onus, hiddenSubAreaSet],
+  );
+  const visibleLinks = useMemo(() => {
+    if (hiddenSubAreaSet.size === 0) return links;
+    // A span also leaves the map when either endpoint device does, otherwise the
+    // line would hang in space with no marker at its end.
+    const visibleDeviceIds = new Set([
+      ...visibleTjs.map((tj) => tj.id),
+      ...visibleOlts.map((olt) => olt.id),
+      ...visibleOnus.map((onu) => onu.id),
+    ]);
+    return links.filter((link) => {
+      if (link.subAreaId && hiddenSubAreaSet.has(link.subAreaId)) return false;
+      const endpointIds = [
+        link.fromTjId,
+        link.fromOltId,
+        link.fromOnuId,
+        link.toTjId,
+        link.toOltId,
+        link.toOnuId,
+      ];
+      return endpointIds.every((id) => !id || visibleDeviceIds.has(id));
+    });
+  }, [links, visibleTjs, visibleOlts, visibleOnus, hiddenSubAreaSet]);
+
+  const toggleSubAreaVisibility = (subAreaId: string, visible: boolean) => {
+    setHiddenSubAreaIds((current) => {
+      if (visible) return current.filter((id) => id !== subAreaId);
+      return current.includes(subAreaId) ? current : [...current, subAreaId];
+    });
+    if (visible) return;
+    // Close a detail panel whose asset just left the map.
+    const hiddenDeviceIds = new Set([
+      ...tjs.filter((tj) => tj.subAreaId === subAreaId).map((tj) => tj.id),
+      ...olts.filter((olt) => olt.subAreaId === subAreaId).map((olt) => olt.id),
+      ...onus.filter((onu) => onu.subAreaId === subAreaId).map((onu) => onu.id),
+    ]);
+    if (selectedTjId && hiddenDeviceIds.has(selectedTjId)) setSelectedTjId(null);
+    if (selectedOltId && hiddenDeviceIds.has(selectedOltId)) setSelectedOltId(null);
+    if (selectedOnuId && hiddenDeviceIds.has(selectedOnuId)) setSelectedOnuId(null);
+    const selectedSpan = links.find((link) => link.id === selectedLinkId);
+    if (
+      selectedSpan &&
+      (selectedSpan.subAreaId === subAreaId ||
+        [selectedSpan.fromTjId, selectedSpan.fromOltId, selectedSpan.fromOnuId,
+          selectedSpan.toTjId, selectedSpan.toOltId, selectedSpan.toOnuId].some(
+          (id) => id && hiddenDeviceIds.has(id),
+        ))
+    ) {
+      setSelectedLinkId(null);
+    }
+  };
 
   // Camera for the selected area. It is built from the area's own joints, OLTs and ONUs
   // (the network payload is already filtered by area on the server), so opening an
@@ -266,22 +517,42 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
   }, [status, router]);
 
   useEffect(() => {
+    setHiddenSubAreaIds([]);
+  }, [areaId]);
+
+  useEffect(() => {
     function handleKey(event: KeyboardEvent) {
-      if (event.key !== 'Escape') return;
-      if (mode === 'connect') {
-        setConnectFrom(null);
-        setConnectTarget(null);
-        setConnectBends([]);
-        setMode('idle');
+      if (event.key === 'Escape') {
+        if (selectedDevices.size > 0 || mode === 'select') {
+          setSelectedDevices(new Map());
+          if (mode === 'select') setMode('idle');
+          return;
+        }
+        if (mode === 'connect') {
+          setConnectFrom(null);
+          setConnectTarget(null);
+          setConnectBends([]);
+          setMode('idle');
+          return;
+        }
+        if (mode !== 'idle') {
+          setMode('idle');
+          if (mode === 'route') setRoutePicking(null);
+        }
         return;
       }
-      if (mode !== 'idle') {
-        setMode('idle');
+      if ((event.key === 'Delete' || event.key === 'Backspace') && selectedDevices.size > 0 && isAdmin) {
+        const target = event.target as HTMLElement | null;
+        if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) {
+          return;
+        }
+        event.preventDefault();
+        setBulkDeleteOpen(true);
       }
     }
     window.addEventListener('keydown', handleKey);
     return () => window.removeEventListener('keydown', handleKey);
-  }, [mode]);
+  }, [mode, selectedDevices, isAdmin]);
 
   useEffect(() => {
     function handleSidebarKey(event: KeyboardEvent) {
@@ -294,6 +565,24 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
     return () => window.removeEventListener('keydown', handleSidebarKey);
   }, []);
 
+  // Mobile inventory drawer: close on Escape or when the desktop rail appears.
+  useEffect(() => {
+    if (!mobileSidebarOpen) return;
+    const handleKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setMobileSidebarOpen(false);
+    };
+    const desktop = window.matchMedia('(min-width: 1024px)');
+    const handleDesktop = () => {
+      if (desktop.matches) setMobileSidebarOpen(false);
+    };
+    window.addEventListener('keydown', handleKey);
+    desktop.addEventListener('change', handleDesktop);
+    return () => {
+      window.removeEventListener('keydown', handleKey);
+      desktop.removeEventListener('change', handleDesktop);
+    };
+  }, [mobileSidebarOpen]);
+
   // Mirror fresh server payloads into the local state the map renders from.
   useEffect(() => {
     setLocalTjs(data?.tjs ?? []);
@@ -301,6 +590,208 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
     setLocalOnus(data?.onus ?? []);
     setLinks(data?.links ?? []);
   }, [data]);
+
+  /**
+   * Optimistically removes one or more devices and all their links from local state,
+   * then frees the cores on every other device that those links connected to.
+   * Call this right after the API delete succeeds, before mutate().
+   */
+  const applyMultipleDeviceDeletions = useCallback(
+    (devices: Array<{ id: string; kind: 'tj' | 'olt' | 'onu' }>) => {
+      if (devices.length === 0) return;
+      const tjIds = new Set(devices.filter((d) => d.kind === 'tj').map((d) => d.id));
+      const oltIds = new Set(devices.filter((d) => d.kind === 'olt').map((d) => d.id));
+      const onuIds = new Set(devices.filter((d) => d.kind === 'onu').map((d) => d.id));
+
+      // Collect every link that touched any deleted device.
+      setLinks((prevLinks) => {
+        const dying = prevLinks.filter((l) => {
+          if (l.fromTjId && tjIds.has(l.fromTjId)) return true;
+          if (l.toTjId && tjIds.has(l.toTjId)) return true;
+          if (l.fromOltId && oltIds.has(l.fromOltId)) return true;
+          if (l.toOltId && oltIds.has(l.toOltId)) return true;
+          if (l.fromOnuId && onuIds.has(l.fromOnuId)) return true;
+          if (l.toOnuId && onuIds.has(l.toOnuId)) return true;
+          return false;
+        });
+        const dyingIds = new Set(dying.map((l) => l.id));
+        const dyingPrefixes = [...dyingIds].map((id) => `uf-link-${id}-`);
+
+        // Free TJ cores/outputs/splitter legs connected via any dying link.
+        setLocalTjs((prevTjs) =>
+          prevTjs
+            .filter((tj) => !tjIds.has(tj.id))
+            .map((tj) => {
+              const freeCore = (core: import('@/lib/types').Core) => {
+                const lid = (core as { connectedLinkId?: string }).connectedLinkId;
+                return lid && dyingIds.has(lid)
+                  ? { ...core, status: 'free' as const, connectedLinkId: undefined }
+                  : core;
+              };
+              const freeSplitter = (sp: import('@/lib/types').Tj['splitter']) =>
+                sp ? { ...sp, outputs: (sp.outputs ?? []).map(freeCore) } : sp;
+              return {
+                ...tj,
+                cores: (tj.cores ?? []).map(freeCore),
+                outputCores: (tj.outputCores ?? []).map(freeCore),
+                splitter: freeSplitter(tj.splitter),
+                splitters: (tj.splitters ?? []).map(freeSplitter),
+                userFibres: (tj.userFibres ?? []).filter(
+                  (uf) => !dyingPrefixes.some((p) => String((uf as { id?: string }).id ?? '').startsWith(p)),
+                ),
+              };
+            }),
+        );
+
+        // Free ONU cores connected via any dying link.
+        setLocalOnus((prevOnus) =>
+          prevOnus
+            .filter((onu) => !onuIds.has(onu.id))
+            .map((onu) => ({
+              ...onu,
+              cores: (onu.cores ?? []).map((core) => {
+                const lid = (core as { connectedLinkId?: string }).connectedLinkId;
+                return lid && dyingIds.has(lid)
+                  ? { ...core, status: 'free' as const, connectedLinkId: undefined }
+                  : core;
+              }),
+            })),
+        );
+
+        // Remove OLTs from local list if any were deleted.
+        if (oltIds.size > 0) {
+          setLocalOlts((prevOlts) => prevOlts.filter((o) => !oltIds.has(o.id)));
+        }
+
+        // Return links without the dying ones.
+        return prevLinks.filter((l) => !dyingIds.has(l.id));
+      });
+    },
+    [],
+  );
+
+  const applyDeviceDeletion = useCallback(
+    (deletedDeviceId: string, deletedKind: 'tj' | 'olt' | 'onu') => {
+      applyMultipleDeviceDeletions([{ id: deletedDeviceId, kind: deletedKind }]);
+    },
+    [applyMultipleDeviceDeletions],
+  );
+
+  const selectedDeviceIds = useMemo(
+    () => new Set(selectedDevices.keys()),
+    [selectedDevices],
+  );
+
+  const selectionBreakdown = useMemo(() => {
+    let tjCount = 0;
+    let oltCount = 0;
+    let onuCount = 0;
+    selectedDevices.forEach((d) => {
+      if (d.kind === 'tj') tjCount++;
+      else if (d.kind === 'olt') oltCount++;
+      else if (d.kind === 'onu') onuCount++;
+    });
+    const parts: string[] = [];
+    if (tjCount > 0) parts.push(`${tjCount} Joint${tjCount > 1 ? 's' : ''}`);
+    if (oltCount > 0) parts.push(`${oltCount} OLT${oltCount > 1 ? 's' : ''}`);
+    if (onuCount > 0) parts.push(`${onuCount} ONU${onuCount > 1 ? 's' : ''}`);
+    return {
+      total: selectedDevices.size,
+      tjCount,
+      oltCount,
+      onuCount,
+      summary: parts.join(', ') || `${selectedDevices.size} devices`,
+    };
+  }, [selectedDevices]);
+
+  const handleToggleSelectDevice = useCallback(
+    (device: { kind: 'tj' | 'olt' | 'onu'; id: string }) => {
+      setSelectedDevices((prev) => {
+        const next = new Map(prev);
+        if (next.has(device.id)) {
+          next.delete(device.id);
+        } else {
+          next.set(device.id, device);
+        }
+        return next;
+      });
+      setSelectedTjId(null);
+      setSelectedOltId(null);
+      setSelectedOnuId(null);
+      setSelectedLinkId(null);
+    },
+    [],
+  );
+
+  const handleSelectDevicesInBox = useCallback(
+    (devices: Array<{ kind: 'tj' | 'olt' | 'onu'; id: string }>, append = true) => {
+      setSelectedDevices((prev) => {
+        const next = append ? new Map(prev) : new Map();
+        devices.forEach((d) => next.set(d.id, d));
+        return next;
+      });
+      setSelectedTjId(null);
+      setSelectedOltId(null);
+      setSelectedOnuId(null);
+      setSelectedLinkId(null);
+    },
+    [],
+  );
+
+  const handleSelectAllVisible = useCallback(() => {
+    setSelectedDevices((prev) => {
+      const next = new Map(prev);
+      visibleTjs.forEach((tj) => next.set(tj.id, { kind: 'tj', id: tj.id }));
+      visibleOlts.forEach((olt) => next.set(olt.id, { kind: 'olt', id: olt.id }));
+      visibleOnus.forEach((onu) => next.set(onu.id, { kind: 'onu', id: onu.id }));
+      return next;
+    });
+  }, [visibleTjs, visibleOlts, visibleOnus]);
+
+  const handleClearSelection = useCallback(() => {
+    setSelectedDevices(new Map());
+    if (mode === 'select') {
+      setMode('idle');
+    }
+  }, [mode]);
+
+  async function confirmBulkDelete() {
+    if (selectedDevices.size === 0) return;
+    setBulkDeleting(true);
+    try {
+      const devicesToDelete = Array.from(selectedDevices.values());
+      const results = await Promise.allSettled(
+        devicesToDelete.map((device) => {
+          if (device.kind === 'tj') return api.deleteTj(device.id);
+          if (device.kind === 'olt') return api.deleteOlt(device.id);
+          return api.deleteOnu(device.id);
+        }),
+      );
+
+      const succeeded = devicesToDelete.filter((_, idx) => results[idx].status === 'fulfilled');
+      const failed = devicesToDelete.filter((_, idx) => results[idx].status === 'rejected');
+
+      if (succeeded.length > 0) {
+        applyMultipleDeviceDeletions(succeeded);
+        toast.success(`Deleted ${succeeded.length} device${succeeded.length === 1 ? '' : 's'}`, {
+          description: 'Connected links were removed and device cores were automatically freed.',
+        });
+      }
+
+      if (failed.length > 0) {
+        toast.error(`Failed to delete ${failed.length} device${failed.length === 1 ? '' : 's'}`);
+      }
+
+      setSelectedDevices(new Map());
+      setBulkDeleteOpen(false);
+      if (mode === 'select') setMode('idle');
+      await mutate();
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : 'Could not delete selected devices');
+    } finally {
+      setBulkDeleting(false);
+    }
+  }
 
   const focusOn = useCallback((tj: Tj) => {
     setFocus({ lng: tj.lng, lat: tj.lat, zoom: 13.4, nonce: Date.now() });
@@ -338,8 +829,35 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
     setSelectedLinkId(null);
   }, []);
 
+  // The route stays highlighted; clicking a joint in the chain opens its panel.
+  const handleRouteNodeSelect = useCallback(
+    (node: { kind: DeviceKind; id: string }) => {
+      closeRoute();
+      if (node.kind === 'tj') handleSelectTj(node.id);
+      else if (node.kind === 'olt') handleSelectOlt(node.id);
+      else handleSelectOnu(node.id);
+    },
+    [closeRoute, handleSelectTj, handleSelectOlt, handleSelectOnu],
+  );
+
   const handleMapClick = useCallback(
     (point: { lng: number; lat: number }) => {
+      if (mode === 'route') {
+        const picked: RouteTarget = {
+          kind: 'point',
+          lat: point.lat,
+          lng: point.lng,
+          label: `${point.lat.toFixed(5)}, ${point.lng.toFixed(5)}`,
+        };
+        if (routePicking === 'start') {
+          setRouteStart(picked);
+        } else {
+          setRouteTarget(picked);
+        }
+        setRoutePicking(null);
+        setMode('idle');
+        return;
+      }
       if (!isAdmin) {
         toast.error('Viewer seat', { description: 'Only admins can add terminal joints.' });
         setMode('idle');
@@ -374,7 +892,7 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
         return;
       }
     },
-    [isAdmin, mode],
+    [isAdmin, mode, routePicking],
   );
 
   const handleBackgroundClick = useCallback(() => {
@@ -521,7 +1039,80 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
   );
 
   const importMap = useCallback(
-    async (file: MapTransferFile, options: { replace: boolean }) => {
+    async (payload: KmzImportPayload, options: { replace: boolean }) => {
+      const { file, layers } = payload;
+
+      // Google Earth files imported into an area keep their layers: each folder
+      // becomes its own sub-area and its devices and links are filed there.
+      if (layers && layers.length > 0 && areaId) {
+        const existing = await api.subAreas(areaId);
+        const byName = new Map(existing.map((subArea) => [subArea.name.toLowerCase(), subArea]));
+        const idMap = new Map<string, string>();
+        const targets: SubArea[] = [];
+        const totals = { olts: 0, tjs: 0, onus: 0, links: 0, removed: 0, renamed: 0, skippedLinks: 0 };
+
+        try {
+          for (const [index, layer] of layers.entries()) {
+            const name = layerSubAreaName(layer.name);
+            const subArea =
+              byName.get(name.toLowerCase()) ?? (await api.createSubArea(areaId, { name }));
+            byName.set(subArea.name.toLowerCase(), subArea);
+            targets.push(subArea);
+
+            // Codes are unique network-wide; reload between layers so devices
+            // created for earlier layers are counted.
+            const scope = await api.network();
+            const result = await importMapTransfer(
+              { ...layer.file, areaId, subAreaId: subArea.id, links: [] },
+              areaId,
+              { tjs: scope.tjs, olts: scope.olts },
+              {
+                replaceExisting: options.replace && index === 0,
+                current: options.replace && index === 0 ? { tjs, olts, onus, links } : undefined,
+                targetSubAreaId: subArea.id,
+                sharedIdMap: idMap,
+              },
+            );
+            totals.olts += result.olts;
+            totals.tjs += result.tjs;
+            totals.onus += result.onus;
+            totals.removed += result.removed;
+            totals.renamed += result.renamed;
+          }
+
+          // Links come last so a line in one layer can join devices created for
+          // another layer.
+          for (const [index, layer] of layers.entries()) {
+            if (layer.file.links.length === 0) continue;
+            const subArea = targets[index];
+            const result = await importMapTransfer(
+              {
+                ...layer.file,
+                areaId,
+                subAreaId: subArea.id,
+                olts: [],
+                tjs: [],
+                onus: [],
+              },
+              areaId,
+              { tjs: [], olts: [] },
+              { targetSubAreaId: subArea.id, sharedIdMap: idMap },
+            );
+            totals.links += result.links;
+            totals.skippedLinks += result.skippedLinks;
+          }
+        } catch (error) {
+          await mutate();
+          throw error;
+        }
+
+        await mutate();
+        toast.success(options.replace ? 'Map replaced' : 'Map imported', {
+          description: `${totals.olts} OLT · ${totals.tjs} TJ · ${totals.onus} ONU · ${totals.links} links filed into ${targets.length} sub-area${targets.length === 1 ? '' : 's'}${totals.removed > 0 ? ` · ${totals.removed} old device${totals.removed === 1 ? '' : 's'} removed` : ''}${totals.renamed > 0 ? ` · ${totals.renamed} code${totals.renamed === 1 ? '' : 's'} adjusted` : ''}${totals.skippedLinks > 0 ? ` · ${totals.skippedLinks} link${totals.skippedLinks === 1 ? '' : 's'} skipped` : ''}`,
+        });
+        return;
+      }
+
       // Codes are unique across the whole network, so load the full inventory and
       // suffix any imported code/name that is already in use.
       const scope = await api.network();
@@ -546,34 +1137,217 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
     [areaId, tjs, olts, onus, links, mutate],
   );
 
+  /** Devices and links currently filed under one sub-area. */
+  const subAreaSnapshot = useCallback(
+    (subArea: SubArea) => ({
+      tjs: tjs.filter((tj) => tj.subAreaId === subArea.id),
+      olts: olts.filter((olt) => olt.subAreaId === subArea.id),
+      onus: onus.filter((onu) => onu.subAreaId === subArea.id),
+      links: links.filter((link) => link.subAreaId === subArea.id),
+    }),
+    [tjs, olts, onus, links],
+  );
+
+  const countSubArea = useCallback(
+    (subArea: SubArea | null) => {
+      if (!subArea) return { olts: 0, tjs: 0, onus: 0, links: 0 };
+      const scope = subAreaSnapshot(subArea);
+      return {
+        olts: scope.olts.length,
+        tjs: scope.tjs.length,
+        onus: scope.onus.length,
+        links: scope.links.length,
+      };
+    },
+    [subAreaSnapshot],
+  );
+
+  const exportSubArea = useCallback(
+    (fileName: string) => {
+      if (!subAreaExport) return;
+      const snapshot = createSubAreaTransfer(
+        { olts, tjs, links, onus },
+        area ? { id: area.id, name: `${area.districtName} · ${area.name}` } : null,
+        { id: subAreaExport.id, name: subAreaExport.name },
+      );
+      downloadMapTransfer(
+        snapshot,
+        mapTransferFilename(
+          area ? `${area.name} ${subAreaExport.name}` : subAreaExport.name,
+          fileName,
+        ),
+      );
+      toast.success(`${subAreaExport.name} exported`, {
+        description: `${snapshot.olts.length} OLT · ${snapshot.tjs.length} TJ · ${snapshot.onus.length} ONU · ${snapshot.links.length} links`,
+      });
+    },
+    [subAreaExport, area, olts, tjs, links, onus],
+  );
+
+  const importSubArea = useCallback(
+    async (payload: KmzImportPayload, options: { replace: boolean }) => {
+      const target = subAreaImport;
+      if (!target) return;
+      // Codes stay unique network-wide, so conflict checks use the full inventory.
+      const scope = await api.network();
+      const result = await importMapTransfer(
+        payload.file,
+        areaId ?? null,
+        { tjs: scope.tjs, olts: scope.olts },
+        {
+          replaceExisting: options.replace,
+          current: subAreaSnapshot(target),
+          targetSubAreaId: target.id,
+        },
+      ).catch(async (error: unknown) => {
+        await mutate();
+        throw error;
+      });
+      await mutate();
+      toast.success(options.replace ? `${target.name} replaced` : `Imported into ${target.name}`, {
+        description: `${result.olts} OLT · ${result.tjs} TJ · ${result.onus} ONU · ${result.links} links${result.removed > 0 ? ` · ${result.removed} old device${result.removed === 1 ? '' : 's'} removed` : ''}${result.renamed > 0 ? ` · ${result.renamed} code${result.renamed === 1 ? '' : 's'} adjusted` : ''}${result.skippedLinks > 0 ? ` · ${result.skippedLinks} link${result.skippedLinks === 1 ? '' : 's'} skipped` : ''}`,
+      });
+    },
+    [subAreaImport, areaId, subAreaSnapshot, mutate],
+  );
+
+  const confirmDeleteSubArea = useCallback(async () => {
+    const target = subAreaToDelete;
+    if (!target) return;
+    setDeletingSubArea(true);
+    try {
+      const result = await api.deleteSubArea(target.id);
+      setHiddenSubAreaIds((ids) => ids.filter((id) => id !== target.id));
+      setSubAreaToDelete(null);
+      const removed = result.removed;
+      toast.success(`${target.name} deleted`, {
+        description: removed
+          ? `${removed.tjs} TJ · ${removed.olts} OLT · ${removed.onus} ONU · ${removed.links} link${removed.links === 1 ? '' : 's'} removed`
+          : 'Its devices and links were removed too.',
+      });
+      await mutate();
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : 'Could not delete this sub-area');
+    } finally {
+      setDeletingSubArea(false);
+    }
+  }, [subAreaToDelete, mutate]);
+
   const handleLocationSelect = useCallback(
     (item: SearchResultItem) => {
-      setPinnedLocation({ lat: item.lat, lng: item.lng, title: item.title, subtitle: item.subtitle });
-      const isDevice = item.type === 'tj' || item.type === 'olt' || item.type === 'onu';
-      setFocus({
-        lng: item.lng,
-        lat: item.lat,
-        zoom: isDevice ? 15 : 14,
-        nonce: Date.now(),
-      });
+      const isDevice =
+        item.type === 'tj' || item.type === 'olt' || item.type === 'onu' || item.type === 'link';
+
+      const unhideSubAreaIfNeeded = (subAreaId?: string | null) => {
+        if (subAreaId) {
+          setHiddenSubAreaIds((current) => current.filter((id) => id !== subAreaId));
+        }
+      };
+
       if (item.type === 'tj' && item.tjId) {
+        const tj = tjs.find((t) => t.id === item.tjId);
+        const targetLat = tj ? tj.lat : item.lat;
+        const targetLng = tj ? tj.lng : item.lng;
+        unhideSubAreaIfNeeded(tj?.subAreaId ?? item.subAreaId);
         setSelectedTjId(item.tjId);
         setSelectedLinkId(null);
         setSelectedOltId(null);
         setSelectedOnuId(null);
+        setPinnedLocation({
+          lat: targetLat,
+          lng: targetLng,
+          title: tj?.code ?? item.title,
+          subtitle: tj?.name ?? item.subtitle,
+          pinOnly: true,
+        });
+        setFocus({
+          lng: targetLng,
+          lat: targetLat,
+          zoom: 18.5,
+          nonce: Date.now(),
+        });
       } else if (item.type === 'olt' && item.oltId) {
+        const olt = olts.find((o) => o.id === item.oltId);
+        const targetLat = olt?.lat ?? item.lat;
+        const targetLng = olt?.lng ?? item.lng;
+        unhideSubAreaIfNeeded(olt?.subAreaId ?? item.subAreaId);
         setSelectedOltId(item.oltId);
         setSelectedTjId(null);
         setSelectedLinkId(null);
         setSelectedOnuId(null);
+        setPinnedLocation({
+          lat: targetLat,
+          lng: targetLng,
+          title: olt?.code ?? item.title,
+          subtitle: olt?.name ?? item.subtitle,
+          pinOnly: true,
+        });
+        setFocus({
+          lng: targetLng,
+          lat: targetLat,
+          zoom: 18.5,
+          nonce: Date.now(),
+        });
       } else if (item.type === 'onu' && item.onuId) {
+        const onu = onus.find((o) => o.id === item.onuId);
+        const targetLat = onu?.lat ?? item.lat;
+        const targetLng = onu?.lng ?? item.lng;
+        unhideSubAreaIfNeeded(onu?.subAreaId ?? item.subAreaId);
         setSelectedOnuId(item.onuId);
         setSelectedTjId(null);
         setSelectedOltId(null);
         setSelectedLinkId(null);
+        setPinnedLocation({
+          lat: targetLat,
+          lng: targetLng,
+          title: onu?.username ?? item.title,
+          subtitle: onu?.areaName ?? item.subtitle,
+          pinOnly: true,
+        });
+        setFocus({
+          lng: targetLng,
+          lat: targetLat,
+          zoom: 18.5,
+          nonce: Date.now(),
+        });
+      } else if (item.type === 'link' && item.linkId) {
+        const link = links.find((l) => l.id === item.linkId);
+        unhideSubAreaIfNeeded(link?.subAreaId ?? item.subAreaId);
+        setSelectedLinkId(item.linkId);
+        setSelectedTjId(null);
+        setSelectedOltId(null);
+        setSelectedOnuId(null);
+        setPinnedLocation({
+          lat: item.lat,
+          lng: item.lng,
+          title: link?.fibreId ?? item.title,
+          subtitle: item.subtitle,
+          pinOnly: true,
+        });
+        setFocus({
+          lng: item.lng,
+          lat: item.lat,
+          zoom: 17.5,
+          nonce: Date.now(),
+        });
+      } else {
+        // Other (places, raw coordinates, OpenStreetMap) - shows text and button group box
+        setPinnedLocation({
+          lat: item.lat,
+          lng: item.lng,
+          title: item.title,
+          subtitle: item.subtitle,
+          pinOnly: false,
+        });
+        setFocus({
+          lng: item.lng,
+          lat: item.lat,
+          zoom: 18,
+          nonce: Date.now(),
+        });
       }
     },
-    [],
+    [tjs, olts, onus, links],
   );
 
   const handleClearPinnedLocation = useCallback(() => {
@@ -625,7 +1399,7 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
   const handleTjSaved = useCallback(
     async (saved: Tj) => {
       const wasNewJoint = !editingTj;
-      setSelectedTjId(saved.id);
+      if (!wasNewJoint) setSelectedTjId(saved.id);
       setEditingTj(null);
       setDraftPoint(null);
       setPrefillTjCores(null);
@@ -640,6 +1414,34 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
             description: 'Cores joined and the link is back in service.',
           });
           setSelectedLinkId(updated.id);
+          // Optimistically restore cores on connected devices from 'damaged' → 'in_use'.
+          setLinks((prev) => prev.map((l) => (l.id === updated.id ? updated : l)));
+          const restoreCoresOnTj = (tj: import('@/lib/types').Tj): import('@/lib/types').Tj => {
+            const markInUse = (core: import('@/lib/types').Core) =>
+              (core as { connectedLinkId?: string }).connectedLinkId === updated.id && core.status === 'damaged'
+                ? { ...core, status: 'in_use' as const }
+                : core;
+            const restoreSplitter = (sp: import('@/lib/types').Tj['splitter']) =>
+              sp ? { ...sp, outputs: (sp.outputs ?? []).map(markInUse) } : sp;
+            return {
+              ...tj,
+              cores: (tj.cores ?? []).map(markInUse),
+              outputCores: (tj.outputCores ?? []).map(markInUse),
+              splitter: restoreSplitter(tj.splitter),
+              splitters: (tj.splitters ?? []).map(restoreSplitter),
+            };
+          };
+          setLocalTjs((prev) => prev.map(restoreCoresOnTj));
+          setLocalOnus((prev) =>
+            prev.map((onu) => ({
+              ...onu,
+              cores: (onu.cores ?? []).map((core) =>
+                (core as { connectedLinkId?: string }).connectedLinkId === updated.id && core.status === 'damaged'
+                  ? { ...core, status: 'in_use' as const }
+                  : core,
+              ),
+            })),
+          );
         } catch (err) {
           toast.error(err instanceof ApiError ? err.message : 'Cores saved, but could not auto-restore the link.');
         }
@@ -871,6 +1673,13 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
         }
       }
 
+      // Apply the saved optical parameters straight away so every panel reading
+      // localLinks recomputes the chain before the refetch lands.
+      setLinks((current) =>
+        current.some((item) => item.id === saved.id)
+          ? current.map((item) => (item.id === saved.id ? saved : item))
+          : [...current, saved],
+      );
       setSelectedLinkId(saved.id);
       await mutate();
     },
@@ -1004,10 +1813,12 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
     if (!tjToDelete) return;
     setDeleting(true);
     try {
-      await api.deleteTj(tjToDelete.id);
-      toast.success(`${tjToDelete.code} deleted`, { description: 'Its links were removed too.' });
-      if (selectedTjId === tjToDelete.id) setSelectedTjId(null);
+      const deleted = tjToDelete;
+      await api.deleteTj(deleted.id);
+      toast.success(`${deleted.code} deleted`, { description: 'Its links were removed too.' });
+      if (selectedTjId === deleted.id) setSelectedTjId(null);
       setTjToDelete(null);
+      applyDeviceDeletion(deleted.id, 'tj');
       await mutate();
     } catch (err) {
       toast.error(err instanceof ApiError ? err.message : 'Could not delete this joint');
@@ -1020,10 +1831,12 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
     if (!onuToDelete) return;
     setDeleting(true);
     try {
-      await api.deleteOnu(onuToDelete.id);
-      toast.success(`${onuToDelete.username} deleted`);
-      if (selectedOnuId === onuToDelete.id) setSelectedOnuId(null);
+      const deleted = onuToDelete;
+      await api.deleteOnu(deleted.id);
+      toast.success(`${deleted.username} deleted`);
+      if (selectedOnuId === deleted.id) setSelectedOnuId(null);
       setOnuToDelete(null);
+      applyDeviceDeletion(deleted.id, 'onu');
       await mutate();
     } catch (err) {
       toast.error(err instanceof ApiError ? err.message : 'Could not delete this ONU');
@@ -1036,12 +1849,46 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
     if (!linkToDelete) return;
     setDeleting(true);
     try {
-      await api.deleteLink(linkToDelete.id);
-      toast.success(`Link ${linkToDelete.fibreId} deleted`, {
+      const deleted = linkToDelete;
+      await api.deleteLink(deleted.id);
+      toast.success(`Link ${deleted.fibreId} deleted`, {
         description: 'Its cores are free again on both devices.',
       });
-      if (selectedLinkId === linkToDelete.id) setSelectedLinkId(null);
+      if (selectedLinkId === deleted.id) setSelectedLinkId(null);
       setLinkToDelete(null);
+
+      // Optimistically remove link and free cores on connected devices immediately.
+      setLinks((prev) => prev.filter((l) => l.id !== deleted.id));
+      const freeCoresOnTj = (tj: import('@/lib/types').Tj): import('@/lib/types').Tj => {
+        const freeCore = (core: import('@/lib/types').Core) =>
+          (core as { connectedLinkId?: string }).connectedLinkId === deleted.id
+            ? { ...core, status: 'free' as const, connectedLinkId: undefined }
+            : core;
+        const freeSplitter = (sp: import('@/lib/types').Tj['splitter']) =>
+          sp ? { ...sp, outputs: (sp.outputs ?? []).map(freeCore) } : sp;
+        return {
+          ...tj,
+          cores: (tj.cores ?? []).map(freeCore),
+          outputCores: (tj.outputCores ?? []).map(freeCore),
+          splitter: freeSplitter(tj.splitter),
+          splitters: (tj.splitters ?? []).map(freeSplitter),
+          userFibres: (tj.userFibres ?? []).filter(
+            (uf) => !String((uf as { id?: string }).id ?? '').startsWith(`uf-link-${deleted.id}-`),
+          ),
+        };
+      };
+      setLocalTjs((prev) => prev.map(freeCoresOnTj));
+      setLocalOnus((prev) =>
+        prev.map((onu) => ({
+          ...onu,
+          cores: (onu.cores ?? []).map((core) =>
+            (core as { connectedLinkId?: string }).connectedLinkId === deleted.id
+              ? { ...core, status: 'free' as const, connectedLinkId: undefined }
+              : core,
+          ),
+        })),
+      );
+
       await mutate();
     } catch (err) {
       toast.error(err instanceof ApiError ? err.message : 'Could not delete this link');
@@ -1068,6 +1915,52 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
     return <div className="app-canvas h-[100dvh]" />;
   }
 
+  const inventory = (close?: () => void) => (
+    <Sidebar
+      tjs={tjs}
+      olts={olts}
+      onus={onus}
+      links={links}
+      loading={isLoading}
+      selectedId={selectedTjId}
+      selectedLinkId={selectedLinkId}
+      selectedOltId={selectedOltId}
+      selectedOnuId={selectedOnuId}
+      filter={filter}
+      search={search}
+      onSearchChange={setSearch}
+      onFilterChange={setFilter}
+      onSelect={(tj) => {
+        close?.();
+        handleSelectTj(tj.id);
+      }}
+      onSelectOlt={(olt) => {
+        close?.();
+        handleSelectOlt(olt.id);
+      }}
+      onSelectOnu={(onu) => {
+        close?.();
+        handleSelectOnu(onu.id);
+      }}
+      onSelectLink={(link) => {
+        close?.();
+        handleSelectLink(link.id);
+      }}
+      onClose={close}
+      areaId={areaId ?? null}
+      areaName={area?.name ?? null}
+      subAreas={data?.subAreas ?? []}
+      isAdmin={isAdmin}
+      onCreateSubArea={areaId ? () => setSubAreaDialogOpen(true) : undefined}
+      hiddenSubAreaIds={hiddenSubAreaIds}
+      onToggleSubAreaVisibility={toggleSubAreaVisibility}
+      onEditSubArea={setSubAreaForm}
+      onDeleteSubArea={setSubAreaToDelete}
+      onExportSubArea={setSubAreaExport}
+      onImportSubArea={setSubAreaImport}
+    />
+  );
+
   return (
     <div className="app-canvas grain relative h-[100dvh] w-full overflow-hidden">
       <div className="relative flex h-full w-full flex-col overflow-hidden app-shell">
@@ -1077,7 +1970,13 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
           cutCount={cutCount}
           contextLabel={area ? `${area.districtName} · ${area.name}` : undefined}
           sidebarOpen={!sidebarCollapsed}
-          onToggleSidebar={() => setSidebarCollapsed((c) => !c)}
+          onToggleSidebar={() => {
+            if (window.matchMedia('(min-width: 1024px)').matches) {
+              setSidebarCollapsed((c) => !c);
+            } else {
+              setMobileSidebarOpen(true);
+            }
+          }}
           onExportMap={openExport}
           onImportMap={isAdmin ? () => setTransferOpen(true) : undefined}
           back={
@@ -1094,33 +1993,15 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
               sidebarCollapsed ? 'lg:w-0 lg:border-r-0' : 'lg:w-[330px]',
             )}
           >
-            <Sidebar
-              tjs={tjs}
-              olts={olts}
-              onus={onus}
-              links={links}
-              loading={isLoading}
-              selectedId={selectedTjId}
-              selectedLinkId={selectedLinkId}
-              selectedOltId={selectedOltId}
-              selectedOnuId={selectedOnuId}
-              filter={filter}
-              search={search}
-              onSearchChange={setSearch}
-              onFilterChange={setFilter}
-              onSelect={(tj) => handleSelectTj(tj.id)}
-              onSelectOlt={(olt) => handleSelectOlt(olt.id)}
-              onSelectOnu={(onu) => handleSelectOnu(onu.id)}
-              onSelectLink={(link) => handleSelectLink(link.id)}
-            />
+            {inventory()}
           </aside>
 
           <main className="relative min-h-0 min-w-0 flex-1">
             <NetworkMap
-              tjs={tjs}
-              links={links}
-              olts={olts}
-              onus={onus}
+              tjs={visibleTjs}
+              links={visibleLinks}
+              olts={visibleOlts}
+              onus={visibleOnus}
               onSelectOlt={handleSelectOlt}
               onSelectOnu={handleSelectOnu}
               mode={mode}
@@ -1142,6 +2023,8 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
               onCancelConnectTarget={() => setConnectTarget(null)}
               selectedTjId={selectedTjId}
               selectedLinkId={selectedLinkId}
+              selectedOltId={selectedOltId}
+              selectedOnuId={selectedOnuId}
               focus={focus}
               viewReady={!areaId || Boolean(area) || Boolean(data) || Boolean(error)}
               initialView={initialCamera.view}
@@ -1159,23 +2042,51 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
               canMoveDevices={isAdmin}
               onMoveDevice={handleDeviceMove}
               onMoveLinkPath={handleMoveLinkPath}
+              routeOverlay={routeOverlay}
+              onRouteDevice={handleRouteDevice}
+              selectedDeviceIds={selectedDeviceIds}
+              onToggleSelectDevice={handleToggleSelectDevice}
+              onSelectDevicesInBox={handleSelectDevicesInBox}
             />
 
             <LocationSearch
               tjs={tjs}
               olts={olts}
               onus={onus}
+              links={links}
               onSelectLocation={handleLocationSelect}
               onClearPinned={handleClearPinnedLocation}
               activePinned={pinnedLocation ? { title: pinnedLocation.title } : null}
+            />
+
+            <RoutePanel
+              open={routeOpen}
+              onClose={closeRoute}
+              tjs={tjs}
+              olts={olts}
+              onus={onus}
+              start={routeStart}
+              onStartChange={setRouteStart}
+              startSnapped={routeOrigin?.snapped ?? null}
+              startStreet={routeStartStreet}
+              target={routeTarget}
+              onTargetChange={setRouteTarget}
+              snapped={routeTargetPoint ? routeDestination?.snapped ?? null : null}
+              street={routeTargetStreet}
+              picking={routePicking}
+              onTogglePicking={toggleRoutePicking}
+              route={route}
+              streetEnabled={routeStreetEnabled}
+              onStreetEnabled={setRouteStreetEnabled}
+              onSelectNode={handleRouteNodeSelect}
             />
 
 
 
             <MapOverlay
               mode={mode}
-              tjs={tjs}
-              links={links}
+              tjs={visibleTjs}
+              links={visibleLinks}
               onCancelMode={cancelMode}
             />
 
@@ -1227,6 +2138,131 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
               </div>
             ) : null}
 
+            {(mode === 'select' || selectedDevices.size > 0) && (
+              <div className="pointer-events-none absolute inset-x-0 top-4 z-30 flex justify-center px-4">
+                <div className="pointer-events-auto flex w-full max-w-2xl flex-wrap items-center justify-between gap-3 rounded-2xl border border-rose-500/30 bg-background/95 p-2.5 shadow-2xl backdrop-blur dark:border-rose-500/30">
+                  <div className="flex min-w-0 items-center gap-2.5">
+                    <span className="grid size-9 shrink-0 place-items-center rounded-xl bg-rose-500/15 text-rose-600 dark:text-rose-400">
+                      <CheckSquare className="size-5" />
+                    </span>
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs font-bold text-foreground">
+                          {selectionBreakdown.total === 0 ? 'Multi-Select Mode' : `${selectionBreakdown.total} Device${selectionBreakdown.total === 1 ? '' : 's'} Selected`}
+                        </span>
+                        {selectionBreakdown.total > 0 && (
+                          <span className="rounded-full bg-rose-500/15 px-2 py-0.5 text-[10px] font-semibold text-rose-600 dark:text-rose-400">
+                            {selectionBreakdown.summary}
+                          </span>
+                        )}
+                      </div>
+                      <p className="truncate text-[11px] text-muted-foreground">
+                        {selectionBreakdown.total === 0
+                          ? 'Click devices or drag a box across the map to select'
+                          : 'Click more devices or drag to add to selection'}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex shrink-0 items-center gap-1.5">
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      className="h-8 gap-1 text-xs"
+                      onClick={handleSelectAllVisible}
+                      title="Select all visible devices on current map"
+                    >
+                      <CheckCheck className="size-3.5" />
+                      Select All
+                    </Button>
+                    {selectionBreakdown.total > 0 && (
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="ghost"
+                        className="h-8 gap-1 text-xs text-muted-foreground"
+                        onClick={() => setSelectedDevices(new Map())}
+                      >
+                        <RotateCcw className="size-3.5" />
+                        Clear
+                      </Button>
+                    )}
+                    {isAdmin && selectionBreakdown.total > 0 && (
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="destructive"
+                        className="h-8 gap-1.5 font-medium text-xs shadow-md shadow-destructive/20"
+                        onClick={() => setBulkDeleteOpen(true)}
+                      >
+                        <Trash2 className="size-3.5" />
+                        Delete ({selectionBreakdown.total})
+                      </Button>
+                    )}
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="ghost"
+                      className="h-8 px-2 text-muted-foreground"
+                      onClick={handleClearSelection}
+                      title="Exit multi-select mode"
+                    >
+                      <X className="size-4" />
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            <div className="pointer-events-none absolute bottom-[6.15rem] right-[5.7rem] z-20 flex items-center gap-2 sm:bottom-[6.45rem] sm:right-[6.1rem]">
+              {isAdmin && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (mode === 'select') {
+                      setMode('idle');
+                      setSelectedDevices(new Map());
+                    } else {
+                      setMode('select');
+                      if (routeOpen) closeRoute();
+                    }
+                  }}
+                  aria-label="Select multiple devices"
+                  aria-pressed={mode === 'select' || selectedDevices.size > 0}
+                  title="Select multiple devices (or Shift+Click / Drag on map)"
+                  className={cn(
+                    'pointer-events-auto relative grid size-11 place-items-center rounded-xl border shadow-[0_12px_28px_-14px_rgba(15,23,42,0.55)] backdrop-blur-xl transition',
+                    mode === 'select' || selectedDevices.size > 0
+                      ? 'border-rose-400/60 bg-rose-500 text-white shadow-rose-500/25'
+                      : 'border-white/60 bg-white/85 text-foreground hover:bg-white dark:border-white/10 dark:bg-slate-900/85 dark:hover:bg-slate-900',
+                  )}
+                >
+                  <CheckSquare className="size-5" />
+                  {selectedDevices.size > 0 && (
+                    <span className="absolute -right-1.5 -top-1.5 flex size-5 items-center justify-center rounded-full bg-rose-600 text-[10px] font-bold text-white ring-2 ring-background">
+                      {selectedDevices.size > 99 ? '99+' : selectedDevices.size}
+                    </span>
+                  )}
+                </button>
+              )}
+
+              <button
+                type="button"
+                onClick={toggleRoute}
+                aria-label="Shortest route planner"
+                aria-pressed={routeOpen}
+                title="Shortest route"
+                className={cn(
+                  'pointer-events-auto grid size-11 place-items-center rounded-xl border shadow-[0_12px_28px_-14px_rgba(15,23,42,0.55)] backdrop-blur-xl transition',
+                  routeOpen
+                    ? 'border-amber-400/60 bg-amber-500 text-slate-950'
+                    : 'border-white/60 bg-white/85 text-foreground hover:bg-white dark:border-white/10 dark:bg-slate-900/85 dark:hover:bg-slate-900',
+                )}
+              >
+                <Route className="size-5" />
+              </button>
+            </div>
+
             {connecting ? null : (
               <MapFab
                 isAdmin={isAdmin}
@@ -1257,7 +2293,19 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
         </div>
       </div>
 
-
+      {mobileSidebarOpen ? (
+        <div className="fixed inset-0 z-40 lg:hidden" role="dialog" aria-modal="true" aria-label="Network inventory">
+          <button
+            type="button"
+            aria-label="Close inventory"
+            className="absolute inset-0 cursor-default bg-slate-950/45 backdrop-blur-[2px]"
+            onClick={() => setMobileSidebarOpen(false)}
+          />
+          <div className="absolute inset-y-0 left-0 flex w-[86vw] max-w-[330px] flex-col overflow-hidden border-r border-white/60 bg-background shadow-2xl dark:border-white/10">
+            {inventory(() => setMobileSidebarOpen(false))}
+          </div>
+        </div>
+      ) : null}
 
       <LinkDetailPanel
         link={selectedLink}
@@ -1273,6 +2321,34 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
             toast.success(`Link ${updated.fibreId} marked as cut`, {
               description: 'Use Join to open the fibre cut modal, join cores, and restore it.',
             });
+            // Optimistically reflect the cut on the link and its connected cores.
+            setLinks((prev) => prev.map((l) => (l.id === updated.id ? updated : l)));
+            const damageCoresOnTj = (tj: import('@/lib/types').Tj): import('@/lib/types').Tj => {
+              const markDamaged = (core: import('@/lib/types').Core) =>
+                (core as { connectedLinkId?: string }).connectedLinkId === updated.id
+                  ? { ...core, status: 'damaged' as const }
+                  : core;
+              const damageSplitter = (sp: import('@/lib/types').Tj['splitter']) =>
+                sp ? { ...sp, outputs: (sp.outputs ?? []).map(markDamaged) } : sp;
+              return {
+                ...tj,
+                cores: (tj.cores ?? []).map(markDamaged),
+                outputCores: (tj.outputCores ?? []).map(markDamaged),
+                splitter: damageSplitter(tj.splitter),
+                splitters: (tj.splitters ?? []).map(damageSplitter),
+              };
+            };
+            setLocalTjs((prev) => prev.map(damageCoresOnTj));
+            setLocalOnus((prev) =>
+              prev.map((onu) => ({
+                ...onu,
+                cores: (onu.cores ?? []).map((core) =>
+                  (core as { connectedLinkId?: string }).connectedLinkId === updated.id
+                    ? { ...core, status: 'damaged' as const }
+                    : core,
+                ),
+              })),
+            );
             await mutate();
           } catch (err) {
             toast.error(err instanceof ApiError ? err.message : 'Could not mark this link as cut');
@@ -1311,10 +2387,16 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
             }
           }
 
-          const palette = ['#22d3ee','#34d399','#a78bfa','#fbbf24','#fb7185','#60a5fa','#a3e635','#fb923c'];
-          const cores = (link.cores?.length ? link.cores : Array.from({ length: link.coreCount || 0 }, (_, i) => ({ label: `Core ${i + 1}`, color: palette[i % palette.length] }))).map((c, i) => ({
-            label: c.label || `Core ${i + 1}`,
-            color: c.color || palette[i % palette.length],
+          const cores = (
+            link.cores?.length
+              ? link.cores
+              : Array.from({ length: link.coreCount || 0 }, (_, i) => ({
+                  label: tiaCoreLabel(i + 1),
+                  color: tiaCoreColor(i + 1),
+                }))
+          ).map((c, i) => ({
+            label: c.label || tiaCoreLabel(i + 1),
+            color: c.color || tiaCoreColor(i + 1),
             count: 1,
             status: 'damaged' as const,
           }));
@@ -1360,10 +2442,72 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
         onSaved={async (saved) => {
           const wasNewCabinet = !oltForm?.olt;
           setOltForm(null);
-          setSelectedOltId(saved.id);
+          if (!wasNewCabinet) setSelectedOltId(saved.id);
           await mutate();
           if (wasNewCabinet) focusDeviceArea(saved.areaId);
         }}
+      />
+
+      {areaId && area ? (
+        <SubAreaDialog
+          open={subAreaDialogOpen || Boolean(subAreaForm)}
+          onOpenChange={(open) => {
+            if (open) return;
+            setSubAreaDialogOpen(false);
+            setSubAreaForm(null);
+          }}
+          areaId={areaId}
+          areaName={area.name}
+          subArea={subAreaForm}
+          onSaved={async () => {
+            await mutate();
+          }}
+        />
+      ) : null}
+
+      <ConfirmDialog
+        open={Boolean(subAreaToDelete)}
+        onOpenChange={(open) => {
+          if (!open) setSubAreaToDelete(null);
+        }}
+        title={`Delete ${subAreaToDelete?.name ?? 'sub-area'}?`}
+        description="The sub-area is removed together with every terminal joint, OLT, ONU and fibre link filed under it. Links reaching outside devices are removed too. This cannot be undone."
+        confirmLabel="Delete sub-area"
+        loading={deletingSubArea}
+        onConfirm={confirmDeleteSubArea}
+      />
+
+      <MapExportDialog
+        open={Boolean(subAreaExport)}
+        onOpenChange={(open) => {
+          if (!open) setSubAreaExport(null);
+        }}
+        title={subAreaExport ? `Export ${subAreaExport.name}` : 'Export sub-area'}
+        scopeLabel={subAreaExport ? `sub-area ${subAreaExport.name}` : null}
+        defaultFileName={mapTransferFilename(
+          area && subAreaExport ? `${area.name} ${subAreaExport.name}` : (subAreaExport?.name ?? null),
+        )}
+        counts={countSubArea(subAreaExport)}
+        onExport={exportSubArea}
+      />
+
+      <MapTransferDialog
+        open={Boolean(subAreaImport)}
+        onOpenChange={(open) => {
+          if (!open) setSubAreaImport(null);
+        }}
+        targetLabel={
+          subAreaImport
+            ? `${area ? `${area.districtName} · ${area.name} — ` : ''}${subAreaImport.name}`
+            : null
+        }
+        targetAreaId={areaId ?? null}
+        targetSubArea={
+          subAreaImport ? { id: subAreaImport.id, name: subAreaImport.name } : null
+        }
+        scopeArea={area ? { id: area.id, name: area.name } : null}
+        currentCounts={countSubArea(subAreaImport)}
+        onImport={importSubArea}
       />
 
       <MapExportDialog
@@ -1379,6 +2523,7 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
         onOpenChange={setTransferOpen}
         targetLabel={area ? `${area.districtName} · ${area.name}` : null}
         targetAreaId={areaId ?? null}
+        scopeArea={area ? { id: area.id, name: area.name } : null}
         currentCounts={{
           olts: olts.length,
           tjs: tjs.length,
@@ -1499,10 +2644,12 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
           if (!oltToDelete) return;
           setDeleting(true);
           try {
-            await api.deleteOlt(oltToDelete.id);
-            toast.success(`${oltToDelete.name} deleted`);
+            const deleted = oltToDelete;
+            await api.deleteOlt(deleted.id);
+            toast.success(`${deleted.name} deleted`);
             setSelectedOltId(null);
             setOltToDelete(null);
+            applyDeviceDeletion(deleted.id, 'olt');
             await mutate();
           } catch (err) {
             toast.error(err instanceof ApiError ? err.message : 'Could not delete this OLT');
@@ -1528,7 +2675,7 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
         onSaved={async (saved) => {
           const wasNewOnu = !onuForm?.onu;
           setOnuForm(null);
-          setSelectedOnuId(saved.id);
+          if (!wasNewOnu) setSelectedOnuId(saved.id);
           await mutate();
           if (wasNewOnu) focusDeviceArea(saved.areaId);
         }}
@@ -1568,6 +2715,16 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
         confirmLabel="Delete link"
         loading={deleting}
         onConfirm={confirmDeleteLink}
+      />
+
+      <ConfirmDialog
+        open={bulkDeleteOpen}
+        onOpenChange={setBulkDeleteOpen}
+        title={`Delete ${selectionBreakdown.total} devices?`}
+        description={`This will permanently remove ${selectionBreakdown.summary}. All links connected to these devices will also be removed, and connected cores on other devices will be freed automatically.`}
+        confirmLabel={`Delete ${selectionBreakdown.total} Devices`}
+        loading={bulkDeleting}
+        onConfirm={confirmBulkDelete}
       />
     </div>
   );

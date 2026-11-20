@@ -1,10 +1,11 @@
 'use client';
 
 import { useEffect, useMemo, useState, Fragment } from 'react';
-import { ArrowRight, Cable, Loader2, Plus, Ruler, Trash2, TriangleAlert } from 'lucide-react';
+import { ArrowRight, Cable, Gauge, Layers, Loader2, Plus, Ruler, Trash2, TriangleAlert } from 'lucide-react';
 import { toast } from 'sonner';
 import {
   Dialog,
+  DialogBody,
   DialogContent,
   DialogDescription,
   DialogFooter,
@@ -35,24 +36,28 @@ import type {
   LinkStatus,
   Olt,
   Onu,
+  SubArea,
   Tj,
 } from '@/lib/types';
-import { formatDistance } from '@/lib/utils';
+import { cn, formatDistance } from '@/lib/utils';
 import { routeLengthMeters } from '@/lib/route';
-import { splitterFeedLabels, tjCoreUnavailable } from '@/lib/device-ports';
+import { computePowerBudgets, computeSpanLoss, type PowerBudget } from '@/lib/power-budget';
+import { splitterFeedLabels, splitterFeedName, tjCoreUnavailable } from '@/lib/device-ports';
 import {
   CORES_PER_TUBE,
-  plainCoreLabel,
+  displayCoreLabel,
   tiaCoreColor,
-  tubeCoreHint,
-  tubeCoreLabel,
+  tiaCoreLabel,
   tubeOf,
+  uniqueCoreLabel,
   type FibreCableType,
 } from '@/lib/fibre-cores';
 
 const CORE_COLORS = Array.from({ length: 12 }, (_item, index) => tiaCoreColor(index + 1));
 
 interface CoreRow {
+  /** Stable React key, minted once with crypto.randomUUID() when the row is created. */
+  id: string;
   label: string;
   color: string;
   fromCore: string;
@@ -62,9 +67,21 @@ interface CoreRow {
 }
 
 interface CoreOption {
+  /** Unique per option: splitters repeat the same TIA colour names. */
+  id: string;
   label: string;
+  /** Display name; legacy `T1-01` labels render as their TIA colour name. */
+  name?: string;
   hint: string;
   used: boolean;
+}
+
+/** Identity for one list item; two splitters can both expose a `Blue` leg. */
+function optionId(): string {
+  const webCrypto = globalThis.crypto;
+  return typeof webCrypto?.randomUUID === 'function'
+    ? webCrypto.randomUUID()
+    : `port-${Math.random().toString(36).slice(2)}`;
 }
 
 function splitKey(key: string): { kind: DeviceKind; id: string } | null {
@@ -77,28 +94,35 @@ function keyOf(ref: LinkDeviceRef | null | undefined): string {
   return ref ? `${ref.kind}:${ref.id}` : '';
 }
 
-/** Default strand label for a cable construction and 1-based core number. */
-function labelFor(type: FibreCableType, coreNumber: number): string {
-  return type === 'core' ? plainCoreLabel(coreNumber) : tubeCoreLabel(coreNumber);
+/** Default strand name for a 1-based core number: its TIA colour name. */
+function labelFor(coreNumber: number): string {
+  return tiaCoreLabel(coreNumber);
 }
 
-/** Existing links carry their construction in their strand labels. */
+/** Older links carry their construction in `T1-01`-style strand labels. */
 function inferFibreType(link: FibreLink): FibreCableType {
-  return link.cores.some((core) => /^T\d+-\d+$/i.test(core.label.trim())) ? 'tube' : 'core';
+  if (link.cores.some((core) => /^T\d+-\d+$/i.test(core.label.trim()))) return 'tube';
+  return (link.coreCount ?? link.cores.length) > CORES_PER_TUBE ? 'tube' : 'core';
 }
 
-function makeRows(
-  count: number,
-  existing: CoreRow[] = [],
-  type: FibreCableType = 'tube',
-): CoreRow[] {
-  return Array.from({ length: Math.max(0, Math.min(count, 288)) }, (_value, index) => ({
-    label: existing[index]?.label ?? labelFor(type, index + 1),
-    color: existing[index]?.color ?? CORE_COLORS[index % CORE_COLORS.length],
-    fromCore: existing[index]?.fromCore ?? '',
-    toCore: existing[index]?.toCore ?? '',
-    lossDb: Number(existing[index]?.lossDb ?? 0),
-  }));
+function makeRows(count: number, existing: CoreRow[] = []): CoreRow[] {
+  const used = new Set<string>();
+  return Array.from({ length: Math.max(0, Math.min(count, 288)) }, (_value, index) => {
+    const stored = existing[index]?.label;
+    const label = uniqueCoreLabel(
+      stored ? displayCoreLabel(stored, index + 1) : labelFor(index + 1),
+      used,
+    );
+    used.add(label);
+    return {
+      id: existing[index]?.id ?? optionId(),
+      label,
+      color: existing[index]?.color ?? CORE_COLORS[index % CORE_COLORS.length],
+      fromCore: existing[index]?.fromCore ?? '',
+      toCore: existing[index]?.toCore ?? '',
+      lossDb: Number(existing[index]?.lossDb ?? 0),
+    };
+  });
 }
 
 interface LinkDialogProps {
@@ -157,15 +181,37 @@ export function LinkDialog({
   const [rows, setRows] = useState<CoreRow[]>([]);
   const [status, setStatus] = useState<LinkStatus>('active');
   const [color, setColor] = useState<string | null>(null);
+  const [subAreaId, setSubAreaId] = useState('none');
+  const [subAreas, setSubAreas] = useState<SubArea[]>([]);
   const [notes, setNotes] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Cancel, X, overlay click and Escape all close the dialog; drop whatever was
+  // typed so the next open starts from the link (or a clean cable), never the
+  // abandoned draft.
+  useEffect(() => {
+    if (open) return;
+    setFromKey('');
+    setToKey('');
+    setFibreId('');
+    setCoreCount(String(CORES_PER_TUBE));
+    setAttenuation('0.35');
+    setSpliceCount('2');
+    setConnectionLoss('1');
+    setRows([]);
+    setStatus('active');
+    setColor(null);
+    setSubAreaId('none');
+    setNotes('');
+    setSaving(false);
+    setError(null);
+  }, [open]);
+
   useEffect(() => {
     if (!open) return;
     setError(null);
-    if (link) {
-      setFromKey(
+    if (link) {      setFromKey(
         link.fromKind === 'onu'
           ? `onu:${link.fromOnuId}`
           : link.fromKind === 'olt'
@@ -186,17 +232,27 @@ export function LinkDialog({
       setConnectionLoss(String(link.connectionLossDb ?? 1));
       setColor(link.color ?? null);
       setStatus(link.status);
+      setSubAreaId(link.subAreaId ?? 'none');
       setNotes(link.notes ?? '');
+      const used = new Set<string>();
       setRows(
         link.cores.length > 0
-          ? link.cores.map((core, index) => ({
-              label: core.label || labelFor(type, index + 1),
-              color: core.color ?? CORE_COLORS[index % CORE_COLORS.length],
-              fromCore: core.fromCoreLabel ?? '',
-              toCore: core.toCoreLabel ?? '',
-              lossDb: Number(core.lossDb ?? 0),
-            }))
-          : makeRows(link.coreCount, [], type),
+          ? link.cores.map((core, index) => {
+              const label = uniqueCoreLabel(
+                displayCoreLabel(core.label, index + 1),
+                used,
+              );
+              used.add(label);
+              return {
+                id: optionId(),
+                label,
+                color: core.color ?? CORE_COLORS[index % CORE_COLORS.length],
+                fromCore: core.fromCoreLabel ?? '',
+                toCore: core.toCoreLabel ?? '',
+                lossDb: Number(core.lossDb ?? 0),
+              };
+            })
+          : makeRows(link.coreCount),
       );
       return;
     }
@@ -209,13 +265,13 @@ export function LinkDialog({
     setSpliceCount('2');
     setConnectionLoss('1');
     setColor(null);
-    // Both constructions start with 12 strands; a multi-tube cable forms the
-    // first tube, a standard cable numbers its cores straight through. Ports
-    // chosen in the map connection tool land on the first strand.
-    const fresh = makeRows(CORES_PER_TUBE, [], type);
+    // Both constructions start with 12 strands; names follow the TIA colour
+    // code and ports picked in the map connection tool land on the first strand.
+    const fresh = makeRows(CORES_PER_TUBE);
     fresh[0] = { ...fresh[0], fromCore: fromPort ?? '', toCore: toPort ?? '' };
     setRows(fresh);
     setStatus('active');
+    setSubAreaId('none');
     setNotes('');
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, link, from, to, fromPort, toPort, fibreType]);
@@ -227,6 +283,37 @@ export function LinkDialog({
     onPathChange(link?.path ?? initialPath ?? []);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, link, initialPath]);
+
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    api
+      .subAreas()
+      .then((list) => {
+        if (!cancelled) setSubAreas(list);
+      })
+      .catch(() => {
+        if (!cancelled) setSubAreas([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open]);
+
+  const subAreaGroups = useMemo(() => {
+    const groups = new Map<string, { areaName: string; items: SubArea[] }>();
+    subAreas.forEach((subArea) => {
+      const group = groups.get(subArea.areaId) ?? { areaName: subArea.areaName, items: [] };
+      group.items.push(subArea);
+      groups.set(subArea.areaId, group);
+    });
+    return [...groups.values()].sort((a, b) => a.areaName.localeCompare(b.areaName));
+  }, [subAreas]);
+
+  const subAreaValue =
+    subAreaId === 'none' || subAreas.some((subArea) => subArea.id === subAreaId)
+      ? subAreaId
+      : 'none';
 
   const fromPoint = useMemo(
     () => devicePoint(fromKey, tjs, olts, onus),
@@ -241,6 +328,60 @@ export function LinkDialog({
     if (editing && link?.lengthM != null) return link.lengthM;
     return null;
   }, [link, editing, fromPoint, toPoint, path]);
+
+  // Re-runs the whole OLT → ONU budget on every edit of the three optical
+  // parameters, so each connected ONU's receive power moves as the form changes.
+  const opticalChain = useMemo(() => {
+    const num = (value: string, fallback: number) => {
+      const parsed = Number(value);
+      return Number.isFinite(parsed) ? parsed : fallback;
+    };
+    const attenuationDbPerKm = Math.min(Math.max(num(attenuation, 0.35), 0), 5);
+    const splices = Math.max(0, Math.round(num(spliceCount, 2)));
+    const connectionLossDb = Math.min(Math.max(num(connectionLoss, 1), 0), 20);
+    const lengthM = distance ?? link?.lengthM ?? null;
+    const spanLoss = computeSpanLoss({
+      lengthM,
+      attenuationDbPerKm,
+      spliceCount: splices,
+      connectionLossDb,
+    });
+
+    if (!editing || !link) {
+      return {
+        spanLoss,
+        affected: [] as { onu: Onu; before: PowerBudget | null; after: PowerBudget }[],
+      };
+    }
+
+    const draft: FibreLink = {
+      ...link,
+      lengthM,
+      attenuationDbPerKm,
+      spliceCount: splices,
+      connectionLossDb,
+    };
+    const previewLinks = links.map((item) => (item.id === link.id ? draft : item));
+    const before = computePowerBudgets(tjs, olts, onus, links);
+    const after = computePowerBudgets(tjs, olts, onus, previewLinks);
+    const affected = onus.flatMap((onu) => {
+      const next = after.get(onu.id);
+      if (!next || !next.spans.some((span) => span.linkId === link.id)) return [];
+      return [{ onu, before: before.get(onu.id) ?? null, after: next }];
+    });
+    return { spanLoss, affected };
+  }, [
+    editing,
+    link,
+    distance,
+    attenuation,
+    spliceCount,
+    connectionLoss,
+    tjs,
+    olts,
+    onus,
+    links,
+  ]);
 
   const rawFromOptions = useMemo(
     () => coreOptions(fromKey, tjs, olts, onus, toKey),
@@ -293,19 +434,22 @@ export function LinkDialog({
     setCoreCount(value);
     const count = Number(value);
     if (!Number.isFinite(count) || count < 0) return;
-    setRows((current) => makeRows(Math.round(count), current, type));
+    setRows((current) => makeRows(Math.round(count), current));
   }
 
-  /** Appends a single strand to a standard core cable. */
+  /** Appends one strand, named after the next colour the cable is not using. */
   function addCore() {
     setRows((current) => {
       if (current.length >= 288) return current;
-      const index = current.length;
+      const used = new Set(current.map((row) => row.label.trim()));
+      let coreNumber = current.length + 1;
+      while (used.has(labelFor(coreNumber))) coreNumber += 1;
       const next = [
         ...current,
         {
-          label: labelFor(type, index + 1),
-          color: CORE_COLORS[index % CORE_COLORS.length],
+          id: optionId(),
+          label: labelFor(coreNumber),
+          color: tiaCoreColor(coreNumber),
           fromCore: '',
           toCore: '',
           lossDb: 0,
@@ -316,19 +460,10 @@ export function LinkDialog({
     });
   }
 
-  /**
-   * Drops one strand and renumbers the plain-core labels after it, leaving any
-   * custom strand names untouched.
-   */
+  /** Drops one strand; the remaining strands keep their colour names. */
   function removeCore(removeIndex: number) {
     setRows((current) => {
-      const next = current
-        .filter((_row, index) => index !== removeIndex)
-        .map((row, index) =>
-          /^(Core \d+|T\d+-\d+)$/i.test(row.label.trim())
-            ? { ...row, label: labelFor(type, index + 1) }
-            : row,
-        );
+      const next = current.filter((_row, index) => index !== removeIndex);
       setCoreCount(String(next.length));
       return next;
     });
@@ -340,7 +475,7 @@ export function LinkDialog({
    */
   function addTube() {
     setRows((current) => {
-      const next = makeRows(current.length + CORES_PER_TUBE, current, type);
+      const next = makeRows(current.length + CORES_PER_TUBE, current);
       setCoreCount(String(next.length));
       return next;
     });
@@ -356,7 +491,7 @@ export function LinkDialog({
         .filter((_row, index) => index < startIndex || index >= startIndex + CORES_PER_TUBE)
         .map((row, index) =>
           index >= startIndex
-            ? { ...row, label: labelFor(type, index + 1), color: tiaCoreColor(index + 1) }
+            ? { ...row, label: labelFor(index + 1), color: tiaCoreColor(index + 1) }
             : row,
         );
       setCoreCount(String(next.length));
@@ -385,7 +520,7 @@ export function LinkDialog({
 
     const cores = rows.map((row, index) => ({
       index: index + 1,
-      label: row.label.trim() || labelFor(type, index + 1),
+      label: row.label.trim() || labelFor(index + 1),
       color: row.color,
       fromCoreLabel: row.fromCore || null,
       toCoreLabel: row.toCore || null,
@@ -403,6 +538,7 @@ export function LinkDialog({
       toCoreLabel: cores.find((core) => core.toCoreLabel)?.toCoreLabel ?? null,
       cores,
       status,
+      subAreaId: subAreaValue === 'none' ? null : subAreaValue,
       notes: notes.trim() || undefined,
       path,
     };
@@ -441,7 +577,7 @@ export function LinkDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[92vh] w-[calc(100vw-2rem)] max-w-[calc(100vw-2rem)] overflow-y-auto overflow-x-hidden sm:max-w-4xl">
+      <DialogContent className="sm:max-w-4xl">
         <DialogHeader>
           <DialogTitle>{editing ? `Link ${link?.fibreId}` : 'Add link'}</DialogTitle>
           <DialogDescription>
@@ -453,6 +589,8 @@ export function LinkDialog({
           </DialogDescription>
         </DialogHeader>
 
+        <form onSubmit={handleSubmit} className="flex min-h-0 flex-1 flex-col">
+          <DialogBody className="space-y-4">
         <div className="flex items-center gap-2 rounded-2xl border border-white/60 bg-white/45 p-3 dark:border-white/10 dark:bg-white/[0.03]">
           <div className="min-w-0 flex-1">
             <p className="text-[9px] font-semibold uppercase tracking-[0.16em] text-muted-foreground">
@@ -488,7 +626,6 @@ export function LinkDialog({
           </span>
         </div>
 
-        <form onSubmit={handleSubmit} className="space-y-4">
           <div className="grid gap-3 sm:grid-cols-2">
             <div className="space-y-2">
               <Label htmlFor="link-from-device">From device</Label>
@@ -523,7 +660,8 @@ export function LinkDialog({
                       <SelectLabel>ONUs (subscribers)</SelectLabel>
                       {onus.map((onu) => (
                         <SelectItem key={onu.id} value={`onu:${onu.id}`}>
-                          {onu.username} · {onu.fibreId}
+                          {onu.username}
+                          {onu.fibreId ? ` · ${onu.fibreId}` : ''}
                         </SelectItem>
                       ))}
                     </SelectGroup>
@@ -572,7 +710,8 @@ export function LinkDialog({
                       <SelectLabel>ONUs (subscribers)</SelectLabel>
                       {onus.map((onu) => (
                         <SelectItem key={onu.id} value={`onu:${onu.id}`}>
-                          {onu.username} · {onu.fibreId}
+                          {onu.username}
+                          {onu.fibreId ? ` · ${onu.fibreId}` : ''}
                         </SelectItem>
                       ))}
                     </SelectGroup>
@@ -609,6 +748,34 @@ export function LinkDialog({
                 className="font-mono text-[12px]"
               />
             </div>
+          </div>
+
+          <div className="space-y-2">
+            <Label htmlFor="link-sub-area" className="flex items-center gap-1.5">
+              <Layers className="size-3.5 text-teal-500" />
+              Sub-area
+            </Label>
+            <Select value={subAreaValue} onValueChange={setSubAreaId} disabled={subAreas.length === 0}>
+              <SelectTrigger id="link-sub-area" className="w-full">
+                <SelectValue placeholder="No sub-area" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="none">No sub-area</SelectItem>
+                {subAreaGroups.map((group) => (
+                  <SelectGroup key={group.areaName}>
+                    <SelectLabel>{group.areaName}</SelectLabel>
+                    {group.items.map((subArea) => (
+                      <SelectItem key={subArea.id} value={subArea.id}>
+                        {subArea.name}
+                      </SelectItem>
+                    ))}
+                  </SelectGroup>
+                ))}
+              </SelectContent>
+            </Select>
+            <p className="text-[10px] text-muted-foreground">
+              Files this span under a sub-area for filtering. Device placement is unchanged.
+            </p>
           </div>
 
           <section className="rounded-xl border border-amber-500/25 bg-amber-500/[0.04] p-3">
@@ -660,6 +827,61 @@ export function LinkDialog({
                 />
               </div>
             </div>
+
+            <div className="mt-3 rounded-xl border border-white/60 bg-white/50 px-2.5 py-2 dark:border-white/10 dark:bg-white/[0.03]">
+              <div className="flex items-center justify-between gap-2">
+                <p className="inline-flex items-center gap-1.5 text-[9.5px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
+                  <Gauge className="size-3 text-teal-500" />
+                  Optical chain · live
+                </p>
+                <span className="font-mono text-[11.5px] font-semibold text-amber-700 dark:text-amber-300">
+                  {opticalChain.spanLoss.totalLossDb.toFixed(2)} dB this span
+                </span>
+              </div>
+              <p className="mt-1 font-mono text-[9.5px] text-muted-foreground">
+                fibre {opticalChain.spanLoss.fibreLossDb.toFixed(2)} dB + splices{' '}
+                {opticalChain.spanLoss.spliceLossDb.toFixed(2)} dB + connectors{' '}
+                {opticalChain.spanLoss.connectionLossDb.toFixed(2)} dB
+                {distance != null ? ` · ${formatDistance(distance)}` : ''}
+              </p>
+              {editing && link ? (
+                opticalChain.affected.length > 0 ? (
+                  <div className="mt-2 space-y-1">
+                    {opticalChain.affected.map(({ onu, before, after }) => {
+                      const previous = before?.rxPowerDbm ?? null;
+                      return (
+                        <div
+                          key={onu.id}
+                          className="flex items-center justify-between gap-2 rounded-lg bg-white/60 px-2 py-1 dark:bg-white/[0.04]"
+                        >
+                          <span
+                            className="min-w-0 truncate font-mono text-[10px]"
+                            title={after.route.map((node) => node.code).join(' → ')}
+                          >
+                            {after.route.map((node) => node.code).join(' → ')}
+                          </span>
+                          <span className="shrink-0 font-mono text-[10px]">
+                            {previous === null ? '—' : previous.toFixed(2)}
+                            <span className="mx-1 text-muted-foreground">→</span>
+                            <span className={`font-semibold ${rxTone(after.status)}`}>
+                              {after.rxPowerDbm.toFixed(2)} dBm
+                            </span>
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <p className="mt-1.5 text-[10px] text-muted-foreground">
+                    No connected ONU route crosses this span yet.
+                  </p>
+                )
+              ) : (
+                <p className="mt-1.5 text-[10px] text-muted-foreground">
+                  Connected ONU power previews once this span is saved.
+                </p>
+              )}
+            </div>
           </section>
 
           <section className="min-w-0 rounded-xl border border-white/60 bg-white/40 p-3 dark:border-white/10 dark:bg-white/[0.03]">
@@ -695,7 +917,7 @@ export function LinkDialog({
               {rows.length > 0 ? (
                 <div className="grid grid-cols-[auto_minmax(0,1fr)_1fr_1fr_auto_auto] items-center gap-2 px-2 pb-0.5 text-[8.5px] font-semibold uppercase tracking-[0.1em] text-muted-foreground">
                   <span aria-hidden />
-                  <span>{type === 'core' ? 'Core' : 'Core · tube'}</span>
+                  <span>Core name</span>
                   <span className="truncate" title={`Cores patched at ${fromCode}`}>
                     From · {fromCodeShort}
                   </span>
@@ -708,14 +930,46 @@ export function LinkDialog({
               ) : null}
               {rows.map((row, index) => {
                 const connected = Boolean(row.fromCore && row.toCore);
+                // Radix mirrors every item into a hidden native <select> keyed by
+                // value, so each option needs its own value even when two
+                // splitters expose the same core name.
+                const fromChoices: CoreOption[] =
+                  row.fromCore && !fromOptions.some((option) => option.label === row.fromCore)
+                    ? [
+                        {
+                          id: `cur-from-${row.id}-${row.fromCore}`,
+                          label: row.fromCore,
+                          name: displayCoreLabel(row.fromCore),
+                          hint: 'core',
+                          used: true,
+                        },
+                        ...fromOptions,
+                      ]
+                    : fromOptions;
+                const toChoices: CoreOption[] =
+                  row.toCore && !toOptions.some((option) => option.label === row.toCore)
+                    ? [
+                        {
+                          id: `cur-to-${row.id}-${row.toCore}`,
+                          label: row.toCore,
+                          name: displayCoreLabel(row.toCore),
+                          hint: 'core',
+                          used: true,
+                        },
+                        ...toOptions,
+                      ]
+                    : toOptions;
+                const fromValue =
+                  fromChoices.find((option) => option.label === row.fromCore)?.id ?? 'none';
+                const toValue = toChoices.find((option) => option.label === row.toCore)?.id ?? 'none';
                 return (
-                  <Fragment key={index}>
+                  <Fragment key={row.id}>
                   {type === 'tube' && index % CORES_PER_TUBE === 0 ? (
                     <div className="flex items-center gap-2 pt-0.5 text-[9px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
                       <span>Tube {tubeOf(index + 1)}</span>
                       <span className="font-mono text-[8.5px] normal-case tracking-normal">
-                        T{tubeOf(index + 1)}-01 →{' '}
-                        {tubeCoreLabel(index + Math.min(CORES_PER_TUBE, rows.length - index))}
+                        {tiaCoreLabel(index + 1)} →{' '}
+                        {tiaCoreLabel(index + Math.min(CORES_PER_TUBE, rows.length - index))}
                       </span>
                       <span className="h-px flex-1 bg-border/60" />
                       <span>
@@ -736,7 +990,7 @@ export function LinkDialog({
                     <label
                       className="relative size-4 shrink-0 cursor-pointer rounded-full border border-white/70 shadow-inner transition hover:scale-110 dark:border-white/20"
                       style={{ backgroundColor: row.color }}
-                      title={`Edit ${row.label || `Core ${index + 1}`} colour`}
+                      title={`Edit ${row.label || tiaCoreLabel(index + 1)} colour`}
                     >
                       <input
                         type="color"
@@ -750,15 +1004,17 @@ export function LinkDialog({
                       value={row.label}
                       onChange={(event) => updateRow(index, { label: event.target.value })}
                       aria-label={`Core ${index + 1} name`}
-                      placeholder={labelFor(type, index + 1)}
-                      title={`${type === 'core' ? `Core ${index + 1}` : tubeCoreHint(index + 1)} — ${row.fromCore ? `from ${fromCode} ${row.fromCore}` : 'not connected at the from end'}, ${row.toCore ? `to ${toCode} ${row.toCore}` : 'not connected at the to end'}`}
+                      placeholder={labelFor(index + 1)}
+                      title={`${tiaCoreLabel(index + 1)} · core ${index + 1} — ${row.fromCore ? `from ${fromCode} ${displayCoreLabel(row.fromCore)}` : 'not connected at the from end'}, ${row.toCore ? `to ${toCode} ${displayCoreLabel(row.toCore)}` : 'not connected at the to end'}`}
                       className="h-8 min-w-0 rounded-md border border-transparent bg-transparent px-1.5 font-mono text-[10.5px] font-semibold outline-none transition focus:border-primary/40 focus:bg-background"
                     />
                     <Select
-                      value={row.fromCore || 'none'}
-                      onValueChange={(value) =>
-                        updateRow(index, { fromCore: value === 'none' ? '' : value })
-                      }
+                      value={fromValue}
+                      onValueChange={(value) => {
+                        if (value === 'none') return updateRow(index, { fromCore: '' });
+                        const picked = fromChoices.find((option) => option.id === value);
+                        if (picked) updateRow(index, { fromCore: picked.label });
+                      }}
                     >
                       <SelectTrigger
                         aria-label={`Core ${index + 1} from endpoint`}
@@ -768,24 +1024,25 @@ export function LinkDialog({
                       </SelectTrigger>
                       <SelectContent>
                         <SelectItem value="none">Not connected</SelectItem>
-                        {(row.fromCore && !fromOptions.some((o) => o.label === row.fromCore) ? [{label: row.fromCore, hint: 'core', used: true}] : []).map((option) => (
-                          <SelectItem key={`cur-${option.label}`} value={option.label}>
-                            {option.label} · {option.hint}
-                          </SelectItem>
-                        ))}
-                        {fromOptions.map((option) => (
-                          <SelectItem key={option.label} value={option.label} disabled={option.used && option.label !== row.fromCore}>
-                            {option.label} · {option.hint}
+                        {fromChoices.map((option) => (
+                          <SelectItem
+                            key={option.id}
+                            value={option.id}
+                            disabled={option.used && option.label !== row.fromCore}
+                          >
+                            {option.name ?? option.label} · {option.hint}
                             {option.used ? ' (in use)' : ' (free)'}
                           </SelectItem>
                         ))}
                       </SelectContent>
                     </Select>
                     <Select
-                      value={row.toCore || 'none'}
-                      onValueChange={(value) =>
-                        updateRow(index, { toCore: value === 'none' ? '' : value })
-                      }
+                      value={toValue}
+                      onValueChange={(value) => {
+                        if (value === 'none') return updateRow(index, { toCore: '' });
+                        const picked = toChoices.find((option) => option.id === value);
+                        if (picked) updateRow(index, { toCore: picked.label });
+                      }}
                     >
                       <SelectTrigger
                         aria-label={`Core ${index + 1} to endpoint`}
@@ -795,14 +1052,13 @@ export function LinkDialog({
                       </SelectTrigger>
                       <SelectContent>
                         <SelectItem value="none">Not connected</SelectItem>
-                        {(row.toCore && !toOptions.some((o) => o.label === row.toCore) ? [{label: row.toCore, hint: 'core', used: true}] : []).map((option) => (
-                          <SelectItem key={`cur-${option.label}`} value={option.label}>
-                            {option.label} · {option.hint}
-                          </SelectItem>
-                        ))}
-                        {toOptions.map((option) => (
-                          <SelectItem key={option.label} value={option.label} disabled={option.used && option.label !== row.toCore}>
-                            {option.label} · {option.hint}
+                        {toChoices.map((option) => (
+                          <SelectItem
+                            key={option.id}
+                            value={option.id}
+                            disabled={option.used && option.label !== row.toCore}
+                          >
+                            {option.name ?? option.label} · {option.hint}
                             {option.used ? ' (in use)' : ' (free)'}
                           </SelectItem>
                         ))}
@@ -907,6 +1163,7 @@ export function LinkDialog({
               <span>{error}</span>
             </div>
           ) : null}
+          </DialogBody>
 
           <DialogFooter className="sm:justify-between">
             <div className="flex items-center gap-2">
@@ -977,7 +1234,7 @@ function deviceInfo(
     const used = cores.filter((core) => core.status === 'in_use').length;
     const area = [onu.districtName, onu.areaName].filter(Boolean).join(' · ') || null;
     const extra = [
-      `Fibre ${onu.fibreId}`,
+      onu.fibreId ? `Fibre ${onu.fibreId}` : null,
       onu.vlanId != null ? `VLAN ${onu.vlanId}` : null,
       onu.macAddress ? `MAC ${onu.macAddress}` : null,
     ]
@@ -1088,22 +1345,22 @@ function DeviceInfoCard({
             {options.map((opt) =>
               opt.used ? (
                 <span
-                  key={opt.label}
+                  key={opt.id}
                   className="inline-flex cursor-not-allowed items-center gap-1 rounded-md border border-rose-500/25 bg-rose-500/10 px-2 py-1 text-[10px] font-medium text-rose-600 opacity-70 dark:text-rose-300"
-                  title={`${opt.label} · ${opt.hint} · in use`}
+                  title={`${opt.name ?? opt.label} · ${opt.hint} · in use`}
                 >
-                  {opt.label}
+                  {opt.name ?? opt.label}
                   <span className="text-[9px]">in use</span>
                 </span>
               ) : (
                 <button
-                  key={opt.label}
+                  key={opt.id}
                   type="button"
                   onClick={() => onPick(opt.label)}
                   className="inline-flex items-center gap-1 rounded-md border border-emerald-500/30 bg-emerald-500/10 px-2 py-1 text-[10px] font-medium text-emerald-700 transition hover:bg-emerald-500/20 dark:text-emerald-300"
-                  title={`${opt.label} · ${opt.hint}`}
+                  title={`${opt.name ?? opt.label} · ${opt.hint}`}
                 >
-                  {opt.label}
+                  {opt.name ?? opt.label}
                   <span className="text-[9px] text-muted-foreground">{opt.hint}</span>
                 </button>
               ),
@@ -1184,32 +1441,45 @@ function coreOptions(
   if (parts.kind === 'onu') {
     const onu = onus.find((item) => item.id === parts.id);
     if (!onu) return [];
-    return (onu.cores ?? []).map((core) => ({
+    return (onu.cores ?? []).map((core, index) => ({
+      id: optionId(),
       label: core.label,
-      hint: 'core',
+      name: displayCoreLabel(core.label, index + 1),
+      hint: 'drop core',
       used: core.status === 'in_use',
     }));
   }
   if (parts.kind === 'tj') {
     const tj = tjs.find((item) => item.id === parts.id);
     if (!tj) return [];
-    const seen = new Set<string>();
     const options: CoreOption[] = [];
-    const push = (label: string, hint: string, used: boolean) => {
-      if (!label || seen.has(label)) return;
-      seen.add(label);
-      options.push({ label, hint, used });
+    const push = (label: string, hint: string, used: boolean, name?: string | null) => {
+      if (!label) return;
+      options.push({
+        id: optionId(),
+        label,
+        name: name ?? displayCoreLabel(label, options.length + 1),
+        hint,
+        used,
+      });
     };
 
+    const cores = tj.cores ?? [];
+    const coreLabels = new Set(cores.map((core) => core.label));
     const feeds = splitterFeedLabels(tj);
-    (tj.cores ?? []).forEach((core) => {
+    cores.forEach((core) => {
       push(
         core.label,
         feeds.has(core.label) ? 'splitter input' : 'core',
         tjCoreUnavailable(core, feeds),
+        splitterFeedName(tj, core.label),
       );
     });
-    feeds.forEach((label) => push(label, 'splitter input', false));
+    feeds.forEach((label) => {
+      if (!coreLabels.has(label)) {
+        push(label, 'splitter input', false, splitterFeedName(tj, label));
+      }
+    });
 
     // A joint can carry several splitters; every leg is connectable, labelled with
     // the splitter it belongs to so parallel splitters stay distinguishable.
@@ -1223,8 +1493,13 @@ function coreOptions(
     });
 
     // Legs mirrored onto the joint's output cores that no splitter lists.
+    const splitterLegs = new Set(
+      splitters.flatMap((splitter) => (splitter?.outputs ?? []).map((core) => core.label)),
+    );
     (tj.outputCores ?? []).forEach((core) => {
-      push(core.label, 'output core', core.status === 'in_use');
+      if (!splitterLegs.has(core.label)) {
+        push(core.label, 'output core', core.status === 'in_use');
+      }
     });
 
     return options;
@@ -1238,15 +1513,30 @@ function coreOptions(
     return olt.ponPorts
       .filter((port) => port.status !== 'in_use')
       .map((port) => ({
+        id: optionId(),
         label: port.label,
-        hint: port.outputDbm === null ? 'PON' : `PON · +${port.outputDbm} dBm`,
+        hint: `${port.outputDbm === null ? 'PON' : `PON · +${port.outputDbm} dBm`}${
+          port.name ? ` · ${port.name}` : ''
+        }`,
         used: false,
       }));
   }
 
   return olt.ponPorts.map((port) => ({
+    id: optionId(),
     label: port.label,
-    hint: port.outputDbm === null ? 'PON' : `PON · +${port.outputDbm} dBm`,
+    hint: `${port.outputDbm === null ? 'PON' : `PON · +${port.outputDbm} dBm`}${
+      port.name ? ` · ${port.name}` : ''
+    }`,
     used: port.status === 'in_use',
   }));
+}
+
+function rxTone(status: PowerBudget['status']) {
+  return cn(
+    status === 'ok' && 'text-emerald-600 dark:text-emerald-400',
+    status === 'marginal' && 'text-amber-600 dark:text-amber-400',
+    status === 'over' && 'text-orange-600 dark:text-orange-400',
+    status === 'overload' && 'text-rose-600 dark:text-rose-400',
+  );
 }

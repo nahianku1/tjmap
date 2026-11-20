@@ -33,6 +33,7 @@ import { Button } from '@/components/ui/button';
 import { CorePatchLine, linkPatches, type CorePatch } from '@/components/map/core-patch-line';
 import type { CoreStatus, FibreLink, Olt, Onu, Tj } from '@/lib/types';
 import { computeOnuPowerBudget, type BudgetStatus } from '@/lib/power-budget';
+import { displayCoreLabel } from '@/lib/fibre-cores';
 import { cn, formatDistance } from '@/lib/utils';
 
 interface OnuDetailPanelProps {
@@ -111,7 +112,7 @@ export function OnuDetailPanel({
               <div className="mb-1 flex flex-wrap items-center gap-1.5">
                 <span className="inline-flex items-center gap-1 rounded-md border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 font-mono text-[10.5px] font-semibold tracking-wide text-amber-700 dark:text-amber-300">
                   <User className="size-3" />
-                  {onu.fibreId}
+                  {onu.fibreId ?? 'No fibre ID'}
                 </span>
                 <span className="rounded-md bg-teal-500/15 px-2 py-0.5 text-[9.5px] font-semibold uppercase tracking-[0.14em] text-teal-700 dark:text-teal-300">
                   ONU
@@ -322,7 +323,9 @@ export function OnuDetailPanel({
                                 className="size-2.5 shrink-0 rounded-full"
                                 style={{ backgroundColor: core.color }}
                               />
-                              <span className="truncate font-semibold">{core.label}</span>
+                              <span className="truncate font-semibold">
+                                {displayCoreLabel(core.label, index + 1)}
+                              </span>
                             </span>
                             <span
                               className={`shrink-0 rounded px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide ${
@@ -334,7 +337,7 @@ export function OnuDetailPanel({
                           </div>
                           {patch ? (
                             <CorePatchLine
-                              localCode={onu.fibreId}
+                              localCode={onu.fibreId ?? onu.username}
                               localCore={core.label}
                               patch={patch}
                             />
@@ -395,6 +398,15 @@ export function OnuDetailPanel({
                   </span>
                   <span className="ml-auto shrink-0 font-mono text-[9px]">WGS 84</span>
                 </p>
+                {onu.subAreaName ? (
+                  <p className="mt-1.5 flex items-center gap-1.5 text-[10px] text-muted-foreground">
+                    <Layers className="size-3 text-teal-500" />
+                    <span className="shrink-0">Sub-area</span>
+                    <span className="ml-auto min-w-0 truncate font-semibold text-primary/90">
+                      {onu.subAreaName}
+                    </span>
+                  </p>
+                ) : null}
               </div>
 
               <section>
@@ -478,7 +490,7 @@ export function OnuDetailPanel({
                   size="icon-sm"
                   variant="ghost"
                   onClick={() => onDelete(onu)}
-                  aria-label={`Delete ${onu.fibreId}`}
+                  aria-label={`Delete ${onu.fibreId ?? onu.username}`}
                   className="text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
                 >
                   <Trash2 className="size-4" />

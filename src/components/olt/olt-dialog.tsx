@@ -5,6 +5,7 @@ import { Loader2, Plus, TriangleAlert, X } from 'lucide-react';
 import { toast } from 'sonner';
 import {
   Dialog,
+  DialogBody,
   DialogContent,
   DialogDescription,
   DialogFooter,
@@ -23,9 +24,11 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { api, ApiError } from '@/lib/api';
-import { OLT_PHOTO } from '@/lib/photos';
+import { cn } from '@/lib/utils';
 import { FibreCorePicker } from '@/components/map/fibre-core-picker';
-import type { Area, FibreLink, Olt, PonPort, PortStatus } from '@/lib/types';
+import { OltFrontPanel } from '@/components/olt/olt-front-panel';
+import { SubAreaDialog } from '@/components/directory/sub-area-dialog';
+import type { Area, FibreLink, Olt, PonPort, PortStatus, SubArea } from '@/lib/types';
 
 const PON_DBM = [3, 5, 7, 9];
 const MAX_PORTS = 64;
@@ -80,6 +83,25 @@ function initialPonRows(olt?: Olt | null): PonPort[] {
   return [{ label: `${PON_PREFIX}1`, outputDbm: 3 }];
 }
 
+/** Active cable patched into this cabinet; a span on the primary PON port wins. */
+function linkedFibreIdOf(olt: Olt | null | undefined, links: FibreLink[]): string | null {
+  if (!olt) return null;
+  const touching = links.filter(
+    (link) =>
+      link.status === 'active' &&
+      (link.fromOltId === olt.id || link.toOltId === olt.id),
+  );
+  if (touching.length === 0) return null;
+  const pon = olt.ponPort?.trim().toLowerCase();
+  const onPort = pon
+    ? touching.find((link) => {
+        const core = link.fromOltId === olt.id ? link.fromCoreLabel : link.toCoreLabel;
+        return (core ?? '').trim().toLowerCase() === pon;
+      })
+    : undefined;
+  return (onPort ?? touching[0]).fibreId;
+}
+
 export function OltDialog({
   open,
   onOpenChange,
@@ -94,12 +116,34 @@ export function OltDialog({
   const [code, setCode] = useState('');
   const [ponRows, setPonRows] = useState<PonPort[]>([]);
   const [areaId, setAreaId] = useState('none');
+  const [subAreaId, setSubAreaId] = useState('none');
   const [lat, setLat] = useState('');
   const [lng, setLng] = useState('');
+  const [fibreId, setFibreId] = useState('');
   const [notes, setNotes] = useState('');
   const [areas, setAreas] = useState<Area[]>([]);
+  const [subAreas, setSubAreas] = useState<SubArea[]>([]);
+  const [subAreaFormOpen, setSubAreaFormOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Closing by any route drops the draft so the next open shows the OLT as
+  // stored (or an empty form), not the half-filled one that was cancelled.
+  useEffect(() => {
+    if (open) return;
+    setName('');
+    setCode('');
+    setPonRows([]);
+    setAreaId('none');
+    setSubAreaId('none');
+    setLat('');
+    setLng('');
+    setFibreId('');
+    setNotes('');
+    setSubAreaFormOpen(false);
+    setSaving(false);
+    setError(null);
+  }, [open]);
 
   useEffect(() => {
     if (!open) return;
@@ -108,8 +152,10 @@ export function OltDialog({
     setCode(olt?.code ?? '');
     setPonRows(initialPonRows(olt));
     setAreaId(olt?.areaId ?? defaultAreaId ?? 'none');
+    setSubAreaId(olt?.subAreaId ?? 'none');
     setLat(olt?.lat != null ? String(olt.lat) : draftPoint ? draftPoint.lat.toFixed(6) : '');
     setLng(olt?.lng != null ? String(olt.lng) : draftPoint ? draftPoint.lng.toFixed(6) : '');
+    setFibreId(olt?.fibreId ?? '');
     setNotes(olt?.notes ?? '');
 
     let cancelled = false;
@@ -121,10 +167,24 @@ export function OltDialog({
       .catch(() => {
         if (!cancelled) setAreas([]);
       });
+    api
+      .subAreas()
+      .then((list) => {
+        if (!cancelled) setSubAreas(list);
+      })
+      .catch(() => {
+        if (!cancelled) setSubAreas([]);
+      });
     return () => {
       cancelled = true;
     };
   }, [open, olt, draftPoint, defaultAreaId]);
+
+  const autoFibreId = linkedFibreIdOf(olt, links);
+  useEffect(() => {
+    if (!autoFibreId) return;
+    setFibreId((current) => (current === autoFibreId ? current : autoFibreId));
+  }, [autoFibreId]);
 
   function updatePon(index: number, patch: Partial<PonPort>) {
     setPonRows((rows) => rows.map((row, i) => (i === index ? { ...row, ...patch } : row)));
@@ -162,10 +222,13 @@ export function OltDialog({
         code: code.trim() ? code.trim().toUpperCase() : undefined,
         ponPorts: ponRows.map((row) => ({
           label: row.label.trim(),
+          name: row.name?.trim() || null,
           outputDbm: row.outputDbm,
           vlanId: row.vlanId ?? null,
         })),
+        fibreId: fibreId.trim() || null,
         areaId: areaId === 'none' ? null : areaId,
+        subAreaId: subAreaValue === 'none' ? null : subAreaValue,
         notes: notes.trim() || undefined,
         ...(lat.trim() && lng.trim() ? { lat: Number(lat), lng: Number(lng) } : {}),
       };
@@ -182,10 +245,15 @@ export function OltDialog({
     }
   }
 
+  const areaSubAreas = subAreas.filter((subArea) => subArea.areaId === areaId);
+  const activeArea = areas.find((area) => area.id === areaId) ?? null;
+  const subAreaValue = areaSubAreas.some((subArea) => subArea.id === subAreaId)
+    ? subAreaId
+    : 'none';
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[90vh] max-w-lg overflow-y-auto">
-        <DialogHeader>
+      <DialogContent className="max-w-lg">        <DialogHeader>
           <DialogTitle>{olt ? `Edit ${olt.name}` : 'New OLT'}</DialogTitle>
           <DialogDescription>
             An OLT carries its PON ports with output power. Joints pick an OLT from this list.
@@ -197,9 +265,16 @@ export function OltDialog({
           ) : null}
         </DialogHeader>
 
-        <form onSubmit={handleSubmit} className="space-y-4">
-          <div className="overflow-hidden rounded-xl border border-border">
-            <img src={OLT_PHOTO} alt="OLT chassis" className="h-24 w-full object-cover" />
+        <form onSubmit={handleSubmit} className="flex min-h-0 flex-1 flex-col">
+          <DialogBody className="space-y-4">
+          <div className="overflow-hidden rounded-xl border border-border bg-[#070d16]">
+            <OltFrontPanel
+              ports={ponRows}
+              links={links}
+              oltId={olt?.id ?? null}
+              code={code || olt?.code || null}
+              className="block h-auto w-full"
+            />
           </div>
 
           <div className="grid gap-3 sm:grid-cols-2">
@@ -225,13 +300,33 @@ export function OltDialog({
             </div>
           </div>
 
+          <div className="space-y-2">
+            <Label htmlFor="olt-form-fibre">Input Fibre ID</Label>
+            <Input
+              id="olt-form-fibre"
+              placeholder="F-DHK-GL-01"
+              value={fibreId}
+              onChange={(event) => setFibreId(event.target.value)}
+              readOnly={Boolean(autoFibreId)}
+              className={cn(
+                'font-mono text-[12px]',
+                autoFibreId && 'bg-muted/40 text-muted-foreground',
+              )}
+            />
+            <p className="text-[10px] text-muted-foreground">
+              {autoFibreId
+                ? 'Assigned automatically from the cable linked into this OLT.'
+                : 'Optional. Set manually, or connect a link to this OLT.'}
+            </p>
+          </div>
+
           <section className="space-y-2.5 rounded-xl border border-border bg-muted/20 p-3">
             <div className="flex items-start justify-between gap-2">
               <div>
                 <p className="text-[12px] font-semibold">PON ports</p>
                 <p className="text-[10px] text-muted-foreground">
                   {ponRows.filter((row) => row.status !== 'in_use').length} of {ponRows.length} free
-                  · output power and VLAN per port
+                  · label, optional name, output power and VLAN per port
                 </p>
               </div>
               <Button
@@ -252,64 +347,88 @@ export function OltDialog({
             </div>
 
             {ponRows.map((row, index) => (
-              <div key={`pon-${index}`} className="flex flex-wrap items-center gap-2">
-                <Input
-                  aria-label={`PON port ${index + 1}`}
-                  placeholder="GPON 0/1/1"
-                  value={row.label}
-                  onChange={(event) => updatePon(index, { label: event.target.value })}
-                  className="h-9 min-w-[120px] flex-1 font-mono text-[11.5px]"
-                />
-                <Select
-                  value={row.outputDbm === null ? 'none' : String(row.outputDbm)}
-                  onValueChange={(value) =>
-                    updatePon(index, { outputDbm: value === 'none' ? null : Number(value) })
-                  }
-                >
-                  <SelectTrigger
-                    aria-label={`PON port ${index + 1} output dBm`}
-                    className="h-9 w-[100px] font-mono text-[11.5px]"
+              <div
+                key={`pon-${index}`}
+                className="space-y-2 rounded-lg border border-border/60 bg-background/60 p-2.5"
+              >
+                <div className="flex items-center gap-2">
+                  <Input
+                    aria-label={`PON port ${index + 1}`}
+                    placeholder="GPON 0/1/1"
+                    value={row.label}
+                    onChange={(event) => updatePon(index, { label: event.target.value })}
+                    className="h-9 min-w-0 flex-1 font-mono text-[11.5px]"
+                  />
+                  <PortStatusPill status={row.status} joints={row.joints} />
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon-sm"
+                    aria-label={`Remove PON port ${index + 1}`}
+                    disabled={ponRows.length === 1}
+                    onClick={() => setPonRows((rows) => rows.filter((_row, i) => i !== index))}
                   >
-                    <SelectValue placeholder="dBm" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="none">No dBm</SelectItem>
-                    {PON_DBM.map((value) => (
-                      <SelectItem key={value} value={String(value)}>
-                        +{value} dBm
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                <Input
-                  aria-label={`PON port ${index + 1} VLAN`}
-                  inputMode="numeric"
-                  placeholder="VLAN"
-                  value={row.vlanId ?? ''}
-                  onChange={(event) => {
-                    const digits = event.target.value.replace(/[^0-9]/g, '').slice(0, 4);
-                    updatePon(index, { vlanId: digits ? Number(digits) : null });
-                  }}
-                  className="h-9 w-[76px] font-mono text-[11.5px]"
-                />
-                <PortStatusPill status={row.status} joints={row.joints} />
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon-sm"
-                  aria-label={`Remove PON port ${index + 1}`}
-                  disabled={ponRows.length === 1}
-                  onClick={() => setPonRows((rows) => rows.filter((_row, i) => i !== index))}
-                >
-                  <X className="size-3.5" />
-                </Button>
+                    <X className="size-3.5" />
+                  </Button>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <Input
+                    aria-label={`PON port ${index + 1} name`}
+                    placeholder="Port name, e.g. Gulshan feeder"
+                    value={row.name ?? ''}
+                    onChange={(event) => updatePon(index, { name: event.target.value })}
+                    className="h-9 min-w-[140px] flex-1 text-[11.5px]"
+                  />
+                  <Select
+                    value={row.outputDbm === null ? 'none' : String(row.outputDbm)}
+                    onValueChange={(value) =>
+                      updatePon(index, { outputDbm: value === 'none' ? null : Number(value) })
+                    }
+                  >
+                    <SelectTrigger
+                      aria-label={`PON port ${index + 1} output dBm`}
+                      className="h-9 w-[100px] font-mono text-[11.5px]"
+                    >
+                      <SelectValue placeholder="dBm" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="none">No dBm</SelectItem>
+                      {PON_DBM.map((value) => (
+                        <SelectItem key={value} value={String(value)}>
+                          +{value} dBm
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <Input
+                    type="number"
+                    min={1}
+                    max={4094}
+                    step={1}
+                    aria-label={`PON port ${index + 1} VLAN`}
+                    inputMode="numeric"
+                    placeholder="VLAN"
+                    value={row.vlanId ?? ''}
+                    onChange={(event) => {
+                      const digits = event.target.value.replace(/[^0-9]/g, '').slice(0, 4);
+                      updatePon(index, { vlanId: digits ? Number(digits) : null });
+                    }}
+                    className="h-9 w-[76px] font-mono text-[11.5px]"
+                  />
+                </div>
               </div>
             ))}
           </section>
 
           <div className="space-y-2">
             <Label htmlFor="olt-form-area">Service area</Label>
-            <Select value={areaId} onValueChange={setAreaId}>
+            <Select
+              value={areaId}
+              onValueChange={(value) => {
+                setAreaId(value);
+                setSubAreaId('none');
+              }}
+            >
               <SelectTrigger id="olt-form-area">
                 <SelectValue placeholder="Unassigned" />
               </SelectTrigger>
@@ -318,6 +437,47 @@ export function OltDialog({
                 {areas.map((area) => (
                   <SelectItem key={area.id} value={area.id}>
                     {area.districtName} · {area.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+
+          <div className="space-y-2">
+            <div className="flex items-center justify-between gap-2">
+              <Label htmlFor="olt-form-sub-area">Sub-area</Label>
+              <Button
+                type="button"
+                variant="subtle"
+                size="sm"
+                className="h-7 px-2 text-[10.5px]"
+                disabled={areaId === 'none'}
+                title={
+                  areaId === 'none'
+                    ? 'Pick a service area first'
+                    : `Create a sub-area in ${activeArea?.name ?? 'this area'}`
+                }
+                onClick={() => setSubAreaFormOpen(true)}
+              >
+                <Plus className="size-3" />
+                New
+              </Button>
+            </div>
+            <Select
+              value={subAreaValue}
+              onValueChange={setSubAreaId}
+              disabled={areaId === 'none'}
+            >
+              <SelectTrigger id="olt-form-sub-area">
+                <SelectValue
+                  placeholder={areaId === 'none' ? 'Pick a service area first' : 'No sub-area'}
+                />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="none">No sub-area</SelectItem>
+                {areaSubAreas.map((subArea) => (
+                  <SelectItem key={subArea.id} value={subArea.id}>
+                    {subArea.name}
                   </SelectItem>
                 ))}
               </SelectContent>
@@ -378,6 +538,7 @@ export function OltDialog({
               <span>{error}</span>
             </div>
           ) : null}
+          </DialogBody>
 
           <DialogFooter>
             <Button type="button" variant="ghost" onClick={() => onOpenChange(false)} disabled={saving}>
@@ -390,6 +551,19 @@ export function OltDialog({
           </DialogFooter>
         </form>
       </DialogContent>
+
+      <SubAreaDialog
+        open={subAreaFormOpen}
+        onOpenChange={setSubAreaFormOpen}
+        areaId={areaId === 'none' ? '' : areaId}
+        areaName={activeArea ? `${activeArea.districtName} · ${activeArea.name}` : 'this area'}
+        onSaved={(saved) => {
+          setSubAreas((list) =>
+            list.some((item) => item.id === saved.id) ? list : [...list, saved],
+          );
+          setSubAreaId(saved.id);
+        }}
+      />
     </Dialog>
   );
 }

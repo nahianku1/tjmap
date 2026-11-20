@@ -104,7 +104,14 @@ export function OltDetailPanel({
                         className="font-mono text-[11.5px]"
                       >
                         <div className="flex items-center justify-between gap-2">
-                          <span className="truncate font-semibold">{port.label}</span>
+                          <div className="min-w-0">
+                            <span className="block truncate font-semibold">{port.label}</span>
+                            {port.name ? (
+                              <span className="block truncate text-[10px] text-muted-foreground">
+                                {port.name}
+                              </span>
+                            ) : null}
+                          </div>
                           <span className="flex shrink-0 items-center gap-1.5">
                             <span className="text-muted-foreground">
                               {port.outputDbm === null ? '—' : `+${port.outputDbm} dBm`}
@@ -200,6 +207,15 @@ export function OltDetailPanel({
                   </span>
                   <span className="ml-auto shrink-0 font-mono text-[9px]">WGS 84</span>
                 </p>
+                {olt.subAreaName ? (
+                  <p className="mt-1.5 flex items-center gap-1.5 text-[10px] text-muted-foreground">
+                    <Layers className="size-3 text-teal-500" />
+                    <span className="shrink-0">Sub-area</span>
+                    <span className="ml-auto min-w-0 truncate font-semibold text-primary/90">
+                      {olt.subAreaName}
+                    </span>
+                  </p>
+                ) : null}
               </div>
 
               <section>

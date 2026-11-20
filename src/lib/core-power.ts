@@ -1,5 +1,6 @@
 import type { FibreLink, Olt, Splitter, Tj } from './types';
 import { calculateOutputPower, type SplitRatio } from './optical';
+import { computeSpanLoss } from './power-budget';
 
 export interface UpstreamPower {
   powerDbm: number;
@@ -12,6 +13,18 @@ export interface UpstreamPower {
 
 function norm(value: string | null | undefined): string {
   return (value ?? '').trim().toLowerCase();
+}
+
+function round2(value: number): number {
+  return Math.round(value * 100) / 100;
+}
+
+/**
+ * Power arriving at the near end of a span, i.e. the far-end power minus the
+ * fibre attenuation, splices and connectors recorded on that link.
+ */
+function minusSpanLoss(powerDbm: number, link: FibreLink): number {
+  return round2(powerDbm - computeSpanLoss(link).totalLossDb);
 }
 
 /**
@@ -184,9 +197,10 @@ function tjAnyPower(
 
 /**
  * Follows the fibre link patched to `coreLabel` on `tjId` and returns the power
- * available on the far device's output, e.g. an OLT PON port or an upstream TJ
- * splitter leg. Returns null when the core has no active link or the far device
- * does not carry a power value.
+ * that arrives at this joint, i.e. the far device's output (OLT PON port or an
+ * upstream TJ splitter leg) minus that span's fibre attenuation, splice and
+ * connector losses. Returns null when the core has no active link or the far
+ * device does not carry a power value.
  */
 export function findUpstreamPower(
   tjId: string,
@@ -212,7 +226,7 @@ export function findUpstreamPower(
         const power = oltPortPower(olt, farCore);
         if (power === null) continue;
         return {
-          powerDbm: power,
+          powerDbm: minusSpanLoss(power, link),
           sourceKind: 'olt',
           sourceCode: olt.code,
           sourceCore: farCore,
@@ -228,7 +242,7 @@ export function findUpstreamPower(
       const power = tjCorePower(farTj, farCore, tjs, olts, links, visited);
       if (power === null) continue;
       return {
-        powerDbm: power,
+        powerDbm: minusSpanLoss(power, link),
         sourceKind: 'tj',
         sourceCode: farTj.code,
         sourceCore: farCore,
@@ -256,7 +270,7 @@ export function findUpstreamPower(
       const power = oltPortPower(olt, null);
       if (power === null) continue;
       return {
-        powerDbm: power,
+        powerDbm: minusSpanLoss(power, link),
         sourceKind: 'olt',
         sourceCode: olt.code,
         sourceCore: null,
@@ -272,7 +286,7 @@ export function findUpstreamPower(
     const power = tjAnyPower(farTj, tjs, olts, links, visited);
     if (power === null) continue;
     return {
-      powerDbm: power,
+      powerDbm: minusSpanLoss(power, link),
       sourceKind: 'tj',
       sourceCode: farTj.code,
       sourceCore: null,

@@ -22,7 +22,7 @@ export function MapOverlay({ mode, tjs, links, onCancelMode }: MapOverlayProps) 
   return (
     <>
       <AnimatePresence>
-        {mode !== 'idle' ? (
+        {mode !== 'idle' && mode !== 'connect' && mode !== 'route' && mode !== 'select' ? (
           <motion.div
             key={mode}
             initial={{ opacity: 0, y: -14, scale: 0.97 }}

@@ -5,6 +5,7 @@ import { Loader2, TriangleAlert } from 'lucide-react';
 import { toast } from 'sonner';
 import {
   Dialog,
+  DialogBody,
   DialogContent,
   DialogDescription,
   DialogFooter,
@@ -40,6 +41,16 @@ export function AreaDialog({
   const [description, setDescription] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // A cancelled area form is discarded; opening again starts clean.
+  useEffect(() => {
+    if (open) return;
+    setName('');
+    setCode('');
+    setDescription('');
+    setSaving(false);
+    setError(null);
+  }, [open]);
 
   useEffect(() => {
     if (!open) return;
@@ -89,7 +100,8 @@ export function AreaDialog({
           </DialogDescription>
         </DialogHeader>
 
-        <form onSubmit={handleSubmit} className="space-y-4">
+        <form onSubmit={handleSubmit} className="flex min-h-0 flex-1 flex-col">
+          <DialogBody className="space-y-4">
           <div className="space-y-2">
             <Label htmlFor="area-name">Area name</Label>
             <Input
@@ -132,6 +144,7 @@ export function AreaDialog({
               <span>{error}</span>
             </div>
           ) : null}
+          </DialogBody>
 
           <DialogFooter>
             <Button type="button" variant="ghost" onClick={() => onOpenChange(false)} disabled={saving}>

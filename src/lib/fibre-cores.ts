@@ -56,22 +56,77 @@ export function tiaCoreName(coreNumber: number): string {
 }
 
 /**
- * Label for a 1-based core number, numbered from 1 inside each tube so the
- * count restarts with every tube — core 13 is `T2-01`, not `Core 13`.
+ * Strand name for a 1-based core number, using the TIA-598 colour itself:
+ * `Blue`, `Orange`, … `Aqua`. Colours repeat every 12 cores, so later rounds
+ * carry a short suffix — core 13 is `Blue 2`, not `Blue`.
  */
-export function tubeCoreLabel(coreNumber: number): string {
-  return `T${tubeOf(coreNumber)}-${String(coreInTubeOf(coreNumber)).padStart(2, '0')}`;
+export function tiaCoreLabel(coreNumber: number): string {
+  const n = Math.max(1, Math.round(coreNumber));
+  const round = Math.ceil(n / CORES_PER_TUBE);
+  const name = tiaCoreName(n);
+  return round > 1 ? `${name} ${round}` : name;
 }
 
-/** Label for a single-sheath cable, where cores are numbered across the cable. */
-export function plainCoreLabel(coreNumber: number): string {
-  return `Core ${String(Math.max(1, coreNumber)).padStart(2, '0')}`;
+/**
+ * Turns the labels older builds generated (`T1-01`, `Core 01`, `Leg 01`,
+ * `S2-L01`) into the strand's TIA colour name. Any other label is a manual
+ * name and is returned untouched.
+ */
+export function displayCoreLabel(label: string | null | undefined, fallbackNumber = 1): string {
+  const raw = (label ?? '').trim();
+  if (!raw) return tiaCoreLabel(fallbackNumber);
+
+  const tube = raw.match(/^T(\d+)-(\d+)$/i);
+  if (tube) {
+    return tiaCoreLabel((Number(tube[1]) - 1) * CORES_PER_TUBE + Number(tube[2]));
+  }
+
+  const numbered = raw.match(/^(?:Core|Leg)\s+(\d+)$/i);
+  if (numbered) return tiaCoreLabel(Number(numbered[1]));
+
+  const extra = raw.match(/^S(\d+)-L(\d+)$/i);
+  if (extra) {
+    const coreNumber = (Number(extra[1]) - 2) * CORES_PER_TUBE + Number(extra[2]);
+    return tiaCoreLabel(coreNumber > 0 ? coreNumber : Number(extra[2]));
+  }
+
+  // A splitter-owned leg is stored under its splitter's prefix (`S2:Blue`) so
+  // two splitters in one joint never share a label; it still reads as `Blue`.
+  const owned = raw.match(/^S\d+:(.+)$/);
+  if (owned) return owned[1].trim();
+
+  return raw;
+}
+
+/**
+ * The leg's own name without its splitter prefix: `S2:Blue` → `Blue`. Plain
+ * labels (the primary splitter's legs, manual names) come back unchanged.
+ */
+export function splitterLegBase(label: string | null | undefined): string {
+  const raw = (label ?? '').trim();
+  const owned = raw.match(/^S\d+:(.+)$/);
+  return owned ? owned[1].trim() : raw;
+}
+
+/**
+ * The stored identity of a splitter's leg. The primary splitter keeps the plain
+ * colour names so existing links stay valid; every extra splitter stamps its
+ * legs with its own ordinal (`S2:Blue`), which keeps legs of different
+ * splitters in the same joint distinct even when the colours repeat.
+ */
+export function splitterLegLabel(ordinal: number, base: string): string {
+  const trimmed = (base ?? '').trim();
+  if (!trimmed || ordinal <= 1) return trimmed;
+  return `S${ordinal}:${trimmed}`;
+}
+
+/** Appends ` 2`, ` 3`, … until the label is free inside one device. */
+export function uniqueCoreLabel(label: string, used: Set<string>): string {
+  if (!used.has(label)) return label;
+  let suffix = 2;
+  while (used.has(`${label} ${suffix}`)) suffix += 1;
+  return `${label} ${suffix}`;
 }
 
 /** Cable construction: 12 plain cores, or 12-core tubes repeated. */
 export type FibreCableType = 'core' | 'tube';
-
-/** `Tube 2 · core 5 · Slate` for a 1-based core number. */
-export function tubeCoreHint(coreNumber: number): string {
-  return `Tube ${tubeOf(coreNumber)} · core ${coreInTubeOf(coreNumber)} · ${tiaCoreName(coreNumber)}`;
-}

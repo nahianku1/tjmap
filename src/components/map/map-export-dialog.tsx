@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import { Download } from 'lucide-react';
 import {
   Dialog,
+  DialogBody,
   DialogContent,
   DialogDescription,
   DialogFooter,
@@ -20,6 +21,9 @@ interface MapExportDialogProps {
   /** Suggested file name, including the .json extension. */
   defaultFileName: string;
   counts: { olts: number; tjs: number; onus: number; links: number };
+  /** Optional scope, e.g. a sub-area name. */
+  title?: string;
+  scopeLabel?: string | null;
   onExport: (fileName: string) => void;
 }
 
@@ -28,12 +32,15 @@ export function MapExportDialog({
   onOpenChange,
   defaultFileName,
   counts,
+  title = 'Export map',
+  scopeLabel = null,
   onExport,
 }: MapExportDialogProps) {
   const [fileName, setFileName] = useState(defaultFileName);
 
+  // Cancelling an export restores the suggested name for the next open.
   useEffect(() => {
-    if (open) setFileName(defaultFileName);
+    setFileName(defaultFileName);
   }, [open, defaultFileName]);
 
   function handleSubmit(event: React.FormEvent) {
@@ -52,15 +59,16 @@ export function MapExportDialog({
             <span className="grid size-8 place-items-center rounded-xl bg-sky-500/15 text-sky-600 dark:text-sky-400">
               <Download className="size-4" />
             </span>
-            Export map
+            {title}
           </DialogTitle>
           <DialogDescription>
-            Save {counts.olts} OLT · {counts.tjs} TJ · {counts.onus} ONU · {counts.links} links as
-            a JSON snapshot.
+            Save {counts.olts} OLT · {counts.tjs} TJ · {counts.onus} ONU · {counts.links} links
+            {scopeLabel ? ` filed under ${scopeLabel}` : ''} as a JSON snapshot.
           </DialogDescription>
         </DialogHeader>
 
-        <form onSubmit={handleSubmit} className="space-y-3">
+        <form onSubmit={handleSubmit} className="flex min-h-0 flex-1 flex-col">
+          <DialogBody className="space-y-3">
           <div className="space-y-1.5">
             <Label htmlFor="map-export-name">File name</Label>
             <Input
@@ -74,6 +82,7 @@ export function MapExportDialog({
               The file is saved with a .json extension.
             </p>
           </div>
+          </DialogBody>
 
           <DialogFooter>
             <Button type="button" variant="ghost" onClick={() => onOpenChange(false)}>

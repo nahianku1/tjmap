@@ -3,6 +3,7 @@
 import { Cable, Layers } from 'lucide-react';
 import {
   Dialog,
+  DialogBody,
   DialogContent,
   DialogDescription,
   DialogHeader,
@@ -25,7 +26,7 @@ interface LinkTypeDialogProps {
 export function LinkTypeDialog({ open, onOpenChange, deviceCode, onSelect }: LinkTypeDialogProps) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="w-[calc(100vw-2rem)] max-w-lg">
+      <DialogContent>
         <DialogHeader>
           <DialogTitle>Add link</DialogTitle>
           <DialogDescription>
@@ -35,7 +36,7 @@ export function LinkTypeDialog({ open, onOpenChange, deviceCode, onSelect }: Lin
           </DialogDescription>
         </DialogHeader>
 
-        <div className="grid gap-2.5 sm:grid-cols-2">
+        <DialogBody className="grid gap-2.5 sm:grid-cols-2">
           <button
             type="button"
             onClick={() => onSelect('core')}
@@ -78,7 +79,7 @@ export function LinkTypeDialog({ open, onOpenChange, deviceCode, onSelect }: Lin
             <span className="mt-auto space-y-1 pt-1">
               {[1, 2].map((tube) => (
                 <span key={tube} className="flex items-center gap-1">
-                  <span className="font-mono text-[8px] text-muted-foreground">T{tube}</span>
+                  <span className="font-mono text-[8px] text-muted-foreground">Tube {tube}</span>
                   {Array.from({ length: 12 }, (_value, index) => (
                     <span
                       key={index}
@@ -90,7 +91,7 @@ export function LinkTypeDialog({ open, onOpenChange, deviceCode, onSelect }: Lin
               ))}
             </span>
           </button>
-        </div>
+        </DialogBody>
       </DialogContent>
     </Dialog>
   );

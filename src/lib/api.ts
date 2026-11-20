@@ -12,6 +12,9 @@ import type {
   OltInput,
   Onu,
   OnuInput,
+  SubArea,
+  SubAreaDeleteResult,
+  SubAreaInput,
   Tj,
   TjInput,
   User,
@@ -225,6 +228,28 @@ export const api = {
 
   deleteArea(id: string): Promise<{ ok: boolean }> {
     return request<{ ok: boolean }>(`/areas/${id}`, { method: 'DELETE' });
+  },
+
+  subAreas(areaId?: string): Promise<SubArea[]> {
+    return request<SubArea[]>(
+      areaId ? `/sub-areas?areaId=${encodeURIComponent(areaId)}` : '/sub-areas',
+    );
+  },
+
+  subArea(id: string): Promise<SubArea> {
+    return request<SubArea>(`/sub-areas/${id}`);
+  },
+
+  createSubArea(areaId: string, input: SubAreaInput): Promise<SubArea> {
+    return request<SubArea>(`/areas/${areaId}/sub-areas`, { method: 'POST', ...jsonBody(input) });
+  },
+
+  updateSubArea(id: string, input: Partial<SubAreaInput>): Promise<SubArea> {
+    return request<SubArea>(`/sub-areas/${id}`, { method: 'PATCH', ...jsonBody(input) });
+  },
+
+  deleteSubArea(id: string): Promise<SubAreaDeleteResult> {
+    return request<SubAreaDeleteResult>(`/sub-areas/${id}`, { method: 'DELETE' });
   },
 
   olts(areaId?: string): Promise<Olt[]> {

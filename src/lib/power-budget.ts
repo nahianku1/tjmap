@@ -379,7 +379,9 @@ export function computePowerBudgets(
 }
 
 /** Single-span loss (fibre + splice + connectors) for the link detail panel. */
-export function computeSpanLoss(link: FibreLink) {
+export function computeSpanLoss(
+  link: Pick<FibreLink, 'lengthM' | 'attenuationDbPerKm' | 'spliceCount' | 'connectionLossDb'>,
+) {
   const attenuationDbPerKm = link.attenuationDbPerKm ?? DEFAULT_ATTENUATION_DB_PER_KM;
   const spliceCount = link.spliceCount ?? 2;
   const fibreLossDb = round2(((link.lengthM ?? 0) / 1000) * attenuationDbPerKm);

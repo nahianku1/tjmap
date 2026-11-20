@@ -1,13 +1,15 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Compass,
+  Crosshair,
   History,
   Loader2,
   MapPin,
   Navigation,
   Radio,
+  Route,
   Router,
   Search,
   Server,
@@ -18,16 +20,18 @@ import {
 } from 'lucide-react';
 import {
   POPULAR_BANGLADESH_HUBS,
+  formatDistance,
   searchLocationSuggestions,
   type SearchResultItem,
 } from '@/lib/geocoding';
-import type { Olt, Onu, Tj } from '@/lib/types';
+import type { FibreLink, Olt, Onu, Tj } from '@/lib/types';
 import { cn } from '@/lib/utils';
 
 interface LocationSearchProps {
   tjs: Tj[];
   olts: Olt[];
   onus: Onu[];
+  links: FibreLink[];
   onSelectLocation: (item: SearchResultItem) => void;
   onClearPinned?: () => void;
   activePinned?: { title: string } | null;
@@ -38,6 +42,7 @@ export function LocationSearch({
   tjs,
   olts,
   onus,
+  links,
   onSelectLocation,
   onClearPinned,
   activePinned,
@@ -112,7 +117,7 @@ export function LocationSearch({
       try {
         const results = await searchLocationSuggestions(
           trimmed,
-          { tjs, olts, onus },
+          { tjs, olts, onus, links },
           controller.signal,
         );
         if (!controller.signal.aborted) {
@@ -131,7 +136,7 @@ export function LocationSearch({
       clearTimeout(timer);
       controller.abort();
     };
-  }, [query, tjs, olts, onus]);
+  }, [query, tjs, olts, onus, links]);
 
   function handleSelect(item: SearchResultItem) {
     setQuery(item.title);
@@ -147,6 +152,60 @@ export function LocationSearch({
     inputRef.current?.focus();
   }
 
+  const showQuickHubs = isOpen && query.trim().length < 2;
+  const showResults = isOpen && query.trim().length >= 2;
+
+  const exactResults = useMemo(
+    () => suggestions.filter((s) => s.isExact && s.type !== 'place'),
+    [suggestions],
+  );
+  const coordResults = useMemo(
+    () => suggestions.filter((s) => s.category === 'Coordinate'),
+    [suggestions],
+  );
+  const tjResults = useMemo(
+    () => suggestions.filter((s) => !s.isExact && s.type === 'tj'),
+    [suggestions],
+  );
+  const oltResults = useMemo(
+    () => suggestions.filter((s) => !s.isExact && s.type === 'olt'),
+    [suggestions],
+  );
+  const onuResults = useMemo(
+    () => suggestions.filter((s) => !s.isExact && s.type === 'onu'),
+    [suggestions],
+  );
+  const linkResults = useMemo(
+    () => suggestions.filter((s) => !s.isExact && s.type === 'link'),
+    [suggestions],
+  );
+  const placeResults = useMemo(
+    () =>
+      suggestions.filter(
+        (s) =>
+          !s.isExact &&
+          s.category !== 'Coordinate' &&
+          s.type !== 'tj' &&
+          s.type !== 'olt' &&
+          s.type !== 'onu' &&
+          s.type !== 'link',
+      ),
+    [suggestions],
+  );
+
+  const displayedItems = useMemo(
+    () => [
+      ...exactResults,
+      ...coordResults,
+      ...tjResults,
+      ...oltResults,
+      ...onuResults,
+      ...linkResults,
+      ...placeResults,
+    ],
+    [exactResults, coordResults, tjResults, oltResults, onuResults, linkResults, placeResults],
+  );
+
   function handleKeyDown(e: React.KeyboardEvent) {
     if (!isOpen) {
       if (e.key === 'ArrowDown') {
@@ -155,7 +214,7 @@ export function LocationSearch({
       return;
     }
 
-    const total = query.trim().length >= 2 ? suggestions.length : POPULAR_BANGLADESH_HUBS.length;
+    const total = query.trim().length >= 2 ? displayedItems.length : POPULAR_BANGLADESH_HUBS.length;
 
     if (e.key === 'ArrowDown') {
       e.preventDefault();
@@ -166,24 +225,16 @@ export function LocationSearch({
     } else if (e.key === 'Enter') {
       e.preventDefault();
       if (activeIndex >= 0) {
-        const item = query.trim().length >= 2 ? suggestions[activeIndex] : POPULAR_BANGLADESH_HUBS[activeIndex];
+        const item =
+          query.trim().length >= 2
+            ? displayedItems[activeIndex]
+            : POPULAR_BANGLADESH_HUBS[activeIndex];
         if (item) handleSelect(item);
-      } else if (suggestions.length > 0) {
-        handleSelect(suggestions[0]);
+      } else if (displayedItems.length > 0) {
+        handleSelect(displayedItems[0]);
       }
     }
   }
-
-  const showQuickHubs = isOpen && query.trim().length < 2;
-  const showResults = isOpen && query.trim().length >= 2;
-
-  const tjResults = suggestions.filter((s) => s.type === 'tj');
-  const oltResults = suggestions.filter((s) => s.type === 'olt');
-  const onuResults = suggestions.filter((s) => s.type === 'onu');
-  const placeResults = suggestions.filter(
-    (s) => s.type !== 'tj' && s.type !== 'olt' && s.type !== 'onu',
-  );
-  const deviceCount = tjResults.length + oltResults.length + onuResults.length;
 
   return (
     <div
@@ -221,7 +272,7 @@ export function LocationSearch({
           }}
           onFocus={() => setIsOpen(true)}
           onKeyDown={handleKeyDown}
-          placeholder="Search location, joint, OLT, or ONU..."
+          placeholder="Search place, device, link, or lat, lng..."
           className="h-full min-w-0 flex-1 bg-transparent text-[12.5px] font-medium outline-none placeholder:text-muted-foreground/70"
           aria-label="Search map location"
         />
@@ -301,9 +352,108 @@ export function LocationSearch({
                 <div className="p-4 text-center text-[11.5px] text-muted-foreground">
                   <p className="font-semibold text-foreground/80">No locations found</p>
                   <p className="mt-0.5 text-[10.5px]">
-                    Try an area, landmark, joint code, OLT code, or ONU username (e.g.
-                    &quot;Gulshan&quot;, &quot;TJ-DHK-001&quot;, &quot;OLT-01&quot;).
+                    Try a place, joint / OLT / ONU code, link fibre ID, or coordinates
+                    (e.g. &quot;Gulshan&quot;, &quot;TJ-DHK-001&quot;, &quot;22.8347, 89.5612&quot;).
                   </p>
+                </div>
+              ) : null}
+
+              {/* EXACT MATCHES SECTION */}
+              {exactResults.length > 0 ? (
+                <div className="mb-1 space-y-0.5">
+                  <div className="flex items-center gap-1.5 px-2.5 py-1 text-[9.5px] font-semibold uppercase tracking-[0.14em] text-emerald-600 dark:text-emerald-400">
+                    <Zap className="size-3" />
+                    Exact Device Match ({exactResults.length})
+                  </div>
+                  {exactResults.map((item) => {
+                    const isFocused = activeIndex === displayedItems.indexOf(item);
+                    return (
+                      <button
+                        key={item.id}
+                        type="button"
+                        onClick={() => handleSelect(item)}
+                        className={cn(
+                          'flex w-full items-center gap-2.5 rounded-xl px-2.5 py-2 text-left transition',
+                          isFocused
+                            ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 ring-1 ring-emerald-500/30'
+                            : 'hover:bg-muted/70 text-foreground',
+                        )}
+                      >
+                        <span className="grid size-7 shrink-0 place-items-center rounded-lg bg-emerald-500/15 text-emerald-600 dark:text-emerald-400">
+                          {item.type === 'tj' ? (
+                            <Radio className="size-3.5" />
+                          ) : item.type === 'olt' ? (
+                            <Server className="size-3.5" />
+                          ) : item.type === 'onu' ? (
+                            <Router className="size-3.5" />
+                          ) : (
+                            <Route className="size-3.5" />
+                          )}
+                        </span>
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            <p className="text-[12px] font-bold font-mono text-primary">
+                              {item.title}
+                            </p>
+                            <span className="rounded bg-emerald-500/15 px-1 py-0.2 text-[9px] font-semibold text-emerald-700 dark:text-emerald-300">
+                              Exact Match
+                            </span>
+                            <span className="rounded bg-primary/10 px-1 py-0.2 text-[9px] font-semibold text-primary">
+                              {item.category}
+                            </span>
+                          </div>
+                          <p className="mt-0.5 truncate text-[10.5px] text-muted-foreground">
+                            {item.subtitle}
+                          </p>
+                        </div>
+                        <span className="shrink-0 font-mono text-[9px] text-muted-foreground/75">
+                          {item.lat.toFixed(4)}, {item.lng.toFixed(4)}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              ) : null}
+
+              {/* COORDINATES PIN TARGET OPTION */}
+              {coordResults.length > 0 ? (
+                <div className="mb-1 space-y-0.5">
+                  {coordResults.map((item) => {
+                    const isFocused = activeIndex === displayedItems.indexOf(item);
+                    return (
+                      <button
+                        key={item.id}
+                        type="button"
+                        onClick={() => handleSelect(item)}
+                        className={cn(
+                          'flex w-full items-center gap-2.5 rounded-xl px-2.5 py-2 text-left transition border border-rose-500/20 bg-rose-500/5',
+                          isFocused
+                            ? 'bg-rose-500/15 text-rose-700 dark:text-rose-300 ring-1 ring-rose-500/30'
+                            : 'hover:bg-rose-500/10 text-foreground',
+                        )}
+                      >
+                        <span className="grid size-7 shrink-0 place-items-center rounded-lg bg-rose-500/15 text-rose-600 dark:text-rose-400">
+                          <Crosshair className="size-3.5" />
+                        </span>
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-1.5">
+                            <p className="text-[12px] font-bold font-mono text-foreground">
+                              {item.title}
+                            </p>
+                            <span className="rounded bg-rose-500/15 px-1 py-0.2 text-[9px] font-semibold text-rose-700 dark:text-rose-300">
+                              Coordinates
+                            </span>
+                          </div>
+                          <p className="mt-0.5 truncate text-[10.5px] text-muted-foreground">
+                            {item.subtitle}
+                          </p>
+                        </div>
+                        <span className="shrink-0 font-mono text-[9.5px] font-semibold text-rose-600 dark:text-rose-400">
+                          Fly to Point
+                        </span>
+                      </button>
+                    );
+                  })}
                 </div>
               ) : null}
 
@@ -314,36 +464,47 @@ export function LocationSearch({
                     <Waypoints className="size-3" />
                     Network Joint Boxes ({tjResults.length})
                   </div>
-                  {tjResults.map((item, i) => (
-                    <button
-                      key={item.id}
-                      type="button"
-                      onClick={() => handleSelect(item)}
-                      className={cn(
-                        'flex w-full items-center gap-2.5 rounded-xl px-2.5 py-2 text-left transition',
-                        activeIndex === i
-                          ? 'bg-teal-500/15 text-teal-700 dark:text-teal-300'
-                          : 'hover:bg-muted/70 text-foreground',
-                      )}
-                    >
-                      <span className="grid size-7 shrink-0 place-items-center rounded-lg bg-teal-500/15 text-teal-600 dark:text-teal-400">
-                        <Radio className="size-3.5" />
-                      </span>
-                      <div className="min-w-0 flex-1">
-                        <div className="flex items-center gap-1.5">
-                          <p className="text-[12px] font-bold font-mono text-primary">
-                            {item.title}
+                  {tjResults.map((item) => {
+                    const isFocused = activeIndex === displayedItems.indexOf(item);
+                    return (
+                      <button
+                        key={item.id}
+                        type="button"
+                        onClick={() => handleSelect(item)}
+                        className={cn(
+                          'flex w-full items-center gap-2.5 rounded-xl px-2.5 py-2 text-left transition',
+                          isFocused
+                            ? 'bg-teal-500/15 text-teal-700 dark:text-teal-300 ring-1 ring-teal-500/30'
+                            : 'hover:bg-muted/70 text-foreground',
+                        )}
+                      >
+                        <span className="grid size-7 shrink-0 place-items-center rounded-lg bg-teal-500/15 text-teal-600 dark:text-teal-400">
+                          <Radio className="size-3.5" />
+                        </span>
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            <p className="text-[12px] font-bold font-mono text-primary">
+                              {item.title}
+                            </p>
+                            <span className="rounded bg-primary/10 px-1 py-0.2 text-[9px] font-semibold text-primary">
+                              {item.category}
+                            </span>
+                            {item.distanceM !== undefined ? (
+                              <span className="rounded bg-muted px-1.5 py-0.2 text-[8.5px] font-medium text-muted-foreground">
+                                {formatDistance(item.distanceM)}
+                              </span>
+                            ) : null}
+                          </div>
+                          <p className="mt-0.5 truncate text-[10.5px] text-muted-foreground">
+                            {item.subtitle}
                           </p>
-                          <span className="rounded bg-primary/10 px-1 py-0.2 text-[9px] font-semibold text-primary">
-                            {item.category}
-                          </span>
                         </div>
-                        <p className="mt-0.5 truncate text-[10.5px] text-muted-foreground">
-                          {item.subtitle}
-                        </p>
-                      </div>
-                    </button>
-                  ))}
+                        <span className="shrink-0 font-mono text-[9px] text-muted-foreground/75">
+                          {item.lat.toFixed(4)}, {item.lng.toFixed(4)}
+                        </span>
+                      </button>
+                    );
+                  })}
                 </div>
               ) : null}
 
@@ -354,36 +515,47 @@ export function LocationSearch({
                     <Server className="size-3" />
                     Network OLTs ({oltResults.length})
                   </div>
-                  {oltResults.map((item, i) => (
-                    <button
-                      key={item.id}
-                      type="button"
-                      onClick={() => handleSelect(item)}
-                      className={cn(
-                        'flex w-full items-center gap-2.5 rounded-xl px-2.5 py-2 text-left transition',
-                        activeIndex === tjResults.length + i
-                          ? 'bg-amber-500/15 text-amber-700 dark:text-amber-300'
-                          : 'hover:bg-muted/70 text-foreground',
-                      )}
-                    >
-                      <span className="grid size-7 shrink-0 place-items-center rounded-lg bg-amber-500/15 text-amber-600 dark:text-amber-400">
-                        <Server className="size-3.5" />
-                      </span>
-                      <div className="min-w-0 flex-1">
-                        <div className="flex items-center gap-1.5">
-                          <p className="text-[12px] font-bold font-mono text-primary">
-                            {item.title}
+                  {oltResults.map((item) => {
+                    const isFocused = activeIndex === displayedItems.indexOf(item);
+                    return (
+                      <button
+                        key={item.id}
+                        type="button"
+                        onClick={() => handleSelect(item)}
+                        className={cn(
+                          'flex w-full items-center gap-2.5 rounded-xl px-2.5 py-2 text-left transition',
+                          isFocused
+                            ? 'bg-amber-500/15 text-amber-700 dark:text-amber-300 ring-1 ring-amber-500/30'
+                            : 'hover:bg-muted/70 text-foreground',
+                        )}
+                      >
+                        <span className="grid size-7 shrink-0 place-items-center rounded-lg bg-amber-500/15 text-amber-600 dark:text-amber-400">
+                          <Server className="size-3.5" />
+                        </span>
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            <p className="text-[12px] font-bold font-mono text-primary">
+                              {item.title}
+                            </p>
+                            <span className="rounded bg-amber-500/15 px-1 py-0.2 text-[9px] font-semibold text-amber-700 dark:text-amber-300">
+                              {item.category}
+                            </span>
+                            {item.distanceM !== undefined ? (
+                              <span className="rounded bg-muted px-1.5 py-0.2 text-[8.5px] font-medium text-muted-foreground">
+                                {formatDistance(item.distanceM)}
+                              </span>
+                            ) : null}
+                          </div>
+                          <p className="mt-0.5 truncate text-[10.5px] text-muted-foreground">
+                            {item.subtitle}
                           </p>
-                          <span className="rounded bg-amber-500/15 px-1 py-0.2 text-[9px] font-semibold text-amber-700 dark:text-amber-300">
-                            {item.category}
-                          </span>
                         </div>
-                        <p className="mt-0.5 truncate text-[10.5px] text-muted-foreground">
-                          {item.subtitle}
-                        </p>
-                      </div>
-                    </button>
-                  ))}
+                        <span className="shrink-0 font-mono text-[9px] text-muted-foreground/75">
+                          {item.lat.toFixed(4)}, {item.lng.toFixed(4)}
+                        </span>
+                      </button>
+                    );
+                  })}
                 </div>
               ) : null}
 
@@ -394,36 +566,98 @@ export function LocationSearch({
                     <Router className="size-3" />
                     Network ONUs ({onuResults.length})
                   </div>
-                  {onuResults.map((item, i) => (
-                    <button
-                      key={item.id}
-                      type="button"
-                      onClick={() => handleSelect(item)}
-                      className={cn(
-                        'flex w-full items-center gap-2.5 rounded-xl px-2.5 py-2 text-left transition',
-                        activeIndex === tjResults.length + oltResults.length + i
-                          ? 'bg-sky-500/15 text-sky-700 dark:text-sky-300'
-                          : 'hover:bg-muted/70 text-foreground',
-                      )}
-                    >
-                      <span className="grid size-7 shrink-0 place-items-center rounded-lg bg-sky-500/15 text-sky-600 dark:text-sky-400">
-                        <Router className="size-3.5" />
-                      </span>
-                      <div className="min-w-0 flex-1">
-                        <div className="flex items-center gap-1.5">
-                          <p className="text-[12px] font-bold font-mono text-primary">
-                            {item.title}
+                  {onuResults.map((item) => {
+                    const isFocused = activeIndex === displayedItems.indexOf(item);
+                    return (
+                      <button
+                        key={item.id}
+                        type="button"
+                        onClick={() => handleSelect(item)}
+                        className={cn(
+                          'flex w-full items-center gap-2.5 rounded-xl px-2.5 py-2 text-left transition',
+                          isFocused
+                            ? 'bg-sky-500/15 text-sky-700 dark:text-sky-300 ring-1 ring-sky-500/30'
+                            : 'hover:bg-muted/70 text-foreground',
+                        )}
+                      >
+                        <span className="grid size-7 shrink-0 place-items-center rounded-lg bg-sky-500/15 text-sky-600 dark:text-sky-400">
+                          <Router className="size-3.5" />
+                        </span>
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            <p className="text-[12px] font-bold font-mono text-primary">
+                              {item.title}
+                            </p>
+                            <span className="rounded bg-sky-500/15 px-1 py-0.2 text-[9px] font-semibold text-sky-700 dark:text-sky-300">
+                              {item.category}
+                            </span>
+                            {item.distanceM !== undefined ? (
+                              <span className="rounded bg-muted px-1.5 py-0.2 text-[8.5px] font-medium text-muted-foreground">
+                                {formatDistance(item.distanceM)}
+                              </span>
+                            ) : null}
+                          </div>
+                          <p className="mt-0.5 truncate text-[10.5px] text-muted-foreground">
+                            {item.subtitle}
                           </p>
-                          <span className="rounded bg-sky-500/15 px-1 py-0.2 text-[9px] font-semibold text-sky-700 dark:text-sky-300">
-                            {item.category}
-                          </span>
                         </div>
-                        <p className="mt-0.5 truncate text-[10.5px] text-muted-foreground">
-                          {item.subtitle}
-                        </p>
-                      </div>
-                    </button>
-                  ))}
+                        <span className="shrink-0 font-mono text-[9px] text-muted-foreground/75">
+                          {item.lat.toFixed(4)}, {item.lng.toFixed(4)}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              ) : null}
+
+              {/* NETWORK FIBRE LINKS SECTION */}
+              {linkResults.length > 0 ? (
+                <div className="mb-1 space-y-0.5">
+                  <div className="flex items-center gap-1.5 px-2.5 py-1 text-[9.5px] font-semibold uppercase tracking-[0.14em] text-fuchsia-600 dark:text-fuchsia-400">
+                    <Route className="size-3" />
+                    Fibre Links ({linkResults.length})
+                  </div>
+                  {linkResults.map((item) => {
+                    const isFocused = activeIndex === displayedItems.indexOf(item);
+                    return (
+                      <button
+                        key={item.id}
+                        type="button"
+                        onClick={() => handleSelect(item)}
+                        className={cn(
+                          'flex w-full items-center gap-2.5 rounded-xl px-2.5 py-2 text-left transition',
+                          isFocused
+                            ? 'bg-fuchsia-500/15 text-fuchsia-700 dark:text-fuchsia-300 ring-1 ring-fuchsia-500/30'
+                            : 'hover:bg-muted/70 text-foreground',
+                        )}
+                      >
+                        <span className="grid size-7 shrink-0 place-items-center rounded-lg bg-fuchsia-500/15 text-fuchsia-600 dark:text-fuchsia-400">
+                          <Route className="size-3.5" />
+                        </span>
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            <p className="text-[12px] font-bold font-mono text-primary">
+                              {item.title}
+                            </p>
+                            <span className="rounded bg-fuchsia-500/15 px-1 py-0.2 text-[9px] font-semibold text-fuchsia-700 dark:text-fuchsia-300">
+                              {item.category}
+                            </span>
+                            {item.distanceM !== undefined ? (
+                              <span className="rounded bg-muted px-1.5 py-0.2 text-[8.5px] font-medium text-muted-foreground">
+                                {formatDistance(item.distanceM)}
+                              </span>
+                            ) : null}
+                          </div>
+                          <p className="mt-0.5 truncate text-[10.5px] text-muted-foreground">
+                            {item.subtitle}
+                          </p>
+                        </div>
+                        <span className="shrink-0 font-mono text-[9px] text-muted-foreground/75">
+                          {item.lat.toFixed(4)}, {item.lng.toFixed(4)}
+                        </span>
+                      </button>
+                    );
+                  })}
                 </div>
               ) : null}
 
@@ -434,8 +668,8 @@ export function LocationSearch({
                     <Navigation className="size-3 text-sky-500" />
                     OpenStreetMap Locations ({placeResults.length})
                   </div>
-                  {placeResults.map((item, i) => {
-                    const globalIdx = deviceCount + i;
+                  {placeResults.map((item) => {
+                    const isFocused = activeIndex === displayedItems.indexOf(item);
                     return (
                       <button
                         key={item.id}
@@ -443,8 +677,8 @@ export function LocationSearch({
                         onClick={() => handleSelect(item)}
                         className={cn(
                           'flex w-full items-center gap-2.5 rounded-xl px-2.5 py-2 text-left transition',
-                          activeIndex === globalIdx
-                            ? 'bg-primary/10 text-primary'
+                          isFocused
+                            ? 'bg-primary/10 text-primary ring-1 ring-primary/30'
                             : 'hover:bg-muted/70 text-foreground',
                         )}
                       >

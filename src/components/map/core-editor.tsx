@@ -2,20 +2,20 @@
 
 import { Plus, Trash2 } from 'lucide-react';
 import type { Core, CoreStatus } from '@/lib/types';
-import { tiaCoreColor, tubeCoreLabel } from '@/lib/fibre-cores';
+import { displayCoreLabel, tiaCoreColor, tiaCoreLabel } from '@/lib/fibre-cores';
 import { cn } from '@/lib/utils';
 
 /** Next core number whose label is not taken yet, so deletes cannot duplicate labels. */
 function nextCoreNumber(cores: Core[]): number {
   const used = new Set(cores.map((core) => core.label.trim()));
   let candidate = cores.length + 1;
-  while (used.has(tubeCoreLabel(candidate))) candidate += 1;
+  while (used.has(tiaCoreLabel(candidate))) candidate += 1;
   return candidate;
 }
 
 function makeCore(index: number): Core {
   return {
-    label: tubeCoreLabel(index),
+    label: tiaCoreLabel(index),
     color: tiaCoreColor(index),
     count: 1,
     status: 'free', // By default all cores are free
@@ -28,6 +28,7 @@ export function CoreEditor({
   addLabel = 'Add core',
   emptyLabel = 'No cores added yet',
   splitterCoreLabel,
+  labelOverrides,
   /** A splitter joint has one fixed input strand per splitter, so these lock. */
   canAdd = true,
   canRemove = true,
@@ -39,6 +40,8 @@ export function CoreEditor({
   addLabel?: string;
   emptyLabel?: string;
   splitterCoreLabel?: string;
+  /** Strands addressed by position instead of a colour (splitter feeds: S1, S2 …). */
+  labelOverrides?: Record<string, string>;
   canAdd?: boolean;
   canRemove?: boolean;
   canChangeStatus?: boolean;
@@ -106,6 +109,7 @@ export function CoreEditor({
         const status = core.status ?? 'free'; // default to free
         const isFree = status === 'free';
         const isDamaged = status === 'damaged';
+        const override = labelOverrides?.[core.label];
 
         return (
           <div
@@ -119,28 +123,35 @@ export function CoreEditor({
                   : 'border-white/60 bg-white/50 dark:border-white/10 dark:bg-white/[0.03]',
             )}
           >
-            <label
-              className="relative size-8 shrink-0 cursor-pointer rounded-lg border border-white/70 shadow-inner transition hover:scale-105 dark:border-white/20"
-              style={{ backgroundColor: core.color }}
-              title="Core colour code"
-            >
-              <input
-                type="color"
-                value={core.color}
-                onChange={(event) => update(index, { color: event.target.value })}
-                className="absolute inset-0 size-full cursor-pointer opacity-0"
-                aria-label={`Colour for ${core.label || `core ${index + 1}`}`}
-              />
-            </label>
+            {override ? (
+              <span className="flex h-8 min-w-0 flex-1 items-center rounded-lg bg-violet-500/[0.07] px-2 font-mono text-[12px] font-semibold text-violet-700 dark:text-violet-300">
+                {override}
+              </span>
+            ) : (
+              <>
+                <label
+                  className="relative size-8 shrink-0 cursor-pointer rounded-lg border border-white/70 shadow-inner transition hover:scale-105 dark:border-white/20"
+                  style={{ backgroundColor: core.color }}
+                  title="Core colour code"
+                >
+                  <input
+                    type="color"
+                    value={core.color}
+                    onChange={(event) => update(index, { color: event.target.value })}
+                    className="absolute inset-0 size-full cursor-pointer opacity-0"
+                    aria-label={`Colour for ${displayCoreLabel(core.label, index + 1)}`}
+                  />
+                </label>
 
-            <input
-              value={core.label}
-              onChange={(event) => update(index, { label: event.target.value })}
-              placeholder="Core label"
-              aria-label="Core label"
-              className="h-8 min-w-0 flex-1 rounded-lg border border-transparent bg-transparent px-2 text-[12px] font-medium outline-none transition focus:border-primary/30 focus:bg-white/70 dark:focus:bg-white/[0.06]"
-            />
-
+                <input
+                  value={displayCoreLabel(core.label, index + 1)}
+                  onChange={(event) => update(index, { label: event.target.value })}
+                  placeholder={tiaCoreLabel(index + 1)}
+                  aria-label={`Core ${displayCoreLabel(core.label, index + 1)}`}
+                  className="h-8 min-w-0 flex-1 rounded-lg border border-transparent bg-transparent px-2 text-[12px] font-medium outline-none transition focus:border-primary/30 focus:bg-white/70 dark:focus:bg-white/[0.06]"
+                />
+              </>
+            )}
             {splitterCoreLabel && core.label === splitterCoreLabel && canChangeStatus ? (
               <span className="inline-flex items-center gap-1 rounded-md bg-violet-500/15 border border-violet-500/30 px-1.5 py-0.5 text-[9.5px] font-semibold text-violet-600 dark:text-violet-300 shrink-0">
                 ⚡ Splitter Feed

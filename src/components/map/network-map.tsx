@@ -32,7 +32,25 @@ export type MapMode =
   | 'add-onu'
   | 'draw-link'
   /** Click a device, pick a port, click the far device, pick its port — no modal. */
-  | 'connect';
+  | 'connect'
+  /** Route planner: the next map click sets the endpoint being picked. */
+  | 'route'
+  /** Multi-select mode: click devices or drag marquee box to select multiple devices. */
+  | 'select';
+
+/** Route planner highlight drawn above the cable graph. */
+export interface MapRouteOverlay {
+  /** Links that make up the shortest path. */
+  linkIds: string[];
+  /** Approaches from free endpoints to their snapped fibre nodes (street geometry or straight drop). */
+  drops: { coordinates: [number, number][] }[];
+  /** Free-point start pin. */
+  start: { lat: number; lng: number; label: string } | null;
+  /** Free-point destination pin. */
+  target: { lat: number; lng: number; label: string } | null;
+  /** Changes when the path, a free endpoint or a street leg changes. */
+  signature: string;
+}
 
 interface NetworkMapProps {
   tjs: Tj[];
@@ -44,6 +62,8 @@ interface NetworkMapProps {
   mode: MapMode;
   selectedTjId: string | null;
   selectedLinkId: string | null;
+  selectedOltId?: string | null;
+  selectedOnuId?: string | null;
   focus?: { lng: number; lat: number; zoom?: number; nonce: number } | null;
   /** Area camera. When omitted the map frames the whole country. */
   initialView?: { lat: number; lng: number; zoom: number } | null;
@@ -58,6 +78,7 @@ interface NetworkMapProps {
     lng: number;
     title: string;
     subtitle?: string;
+    pinOnly?: boolean;
   } | null;
   onSelectTj: (id: string) => void;
   onSelectLink: (id: string) => void;
@@ -97,6 +118,14 @@ interface NetworkMapProps {
   onConnectDevice?: (device: { kind: DeviceKind; id: string }) => void;
   onPickConnectPort?: (label: string) => void;
   onCancelConnectTarget?: () => void;
+  /** Shortest-route highlight produced by the route planner. */
+  routeOverlay?: MapRouteOverlay | null;
+  /** A device was clicked while the route planner is picking endpoints. */
+  onRouteDevice?: (device: { kind: DeviceKind; id: string }) => void;
+  /** Multi-select devices state */
+  selectedDeviceIds?: Set<string>;
+  onToggleSelectDevice?: (device: { kind: DeviceKind; id: string }) => void;
+  onSelectDevicesInBox?: (devices: Array<{ kind: DeviceKind; id: string }>, append?: boolean) => void;
 }
 
 const OSM_TILE_URLS = [
@@ -151,7 +180,9 @@ function getOsmStyle(dark: boolean): StyleSpecification {
         type: 'raster',
         source: 'osm-tiles',
         minzoom: 0,
-        maxzoom: 19,
+        // Keep the layer visible past the source's native tile level (it
+        // overzooms) so deep zooms never drop the base map to a black canvas.
+        maxzoom: 24,
         paint: dark
           ? {
               'raster-brightness-min': 0.08,
@@ -367,6 +398,12 @@ function addNetworkLayers(map: maplibregl.Map, dark: boolean) {
   if (!map.getSource('measure-line')) {
     map.addSource('measure-line', { type: 'geojson', data: EMPTY as never });
   }
+  if (!map.getSource('route-links')) {
+    map.addSource('route-links', { type: 'geojson', data: EMPTY as never });
+  }
+  if (!map.getSource('route-drop')) {
+    map.addSource('route-drop', { type: 'geojson', data: EMPTY as never });
+  }
 
   if (!map.getLayer('links-glow')) {
     map.addLayer({
@@ -563,6 +600,51 @@ function addNetworkLayers(map: maplibregl.Map, dark: boolean) {
       },
     });
   }
+
+  // Shortest-route highlight sits above every cable layer.
+  if (!map.getLayer('route-links-glow')) {
+    map.addLayer({
+      id: 'route-links-glow',
+      type: 'line',
+      source: 'route-links',
+      layout: { 'line-cap': 'round', 'line-join': 'round' },
+      paint: {
+        'line-color': '#f59e0b',
+        'line-width': 11,
+        'line-blur': 6,
+        'line-opacity': 0.4,
+        'line-offset': ['get', 'offset'] as never,
+      },
+    });
+  }
+  if (!map.getLayer('route-links')) {
+    map.addLayer({
+      id: 'route-links',
+      type: 'line',
+      source: 'route-links',
+      layout: { 'line-cap': 'round', 'line-join': 'round' },
+      paint: {
+        'line-color': '#fbbf24',
+        'line-width': ['interpolate', ['linear'], ['zoom'], 4, 3.4, 10, 4.6, 15, 6] as never,
+        'line-opacity': 0.95,
+        'line-offset': ['get', 'offset'] as never,
+      },
+    });
+  }
+  if (!map.getLayer('route-drop')) {
+    map.addLayer({
+      id: 'route-drop',
+      type: 'line',
+      source: 'route-drop',
+      layout: { 'line-cap': 'round', 'line-join': 'round' },
+      paint: {
+        'line-color': '#f59e0b',
+        'line-width': 2.4,
+        'line-dasharray': [1.1, 1.6],
+        'line-opacity': 0.9,
+      },
+    });
+  }
 }
 
 function syncLinkData(map: maplibregl.Map, links: FibreLink[], selectedLinkId: string | null) {
@@ -575,6 +657,31 @@ function syncLinkData(map: maplibregl.Map, links: FibreLink[], selectedLinkId: s
   const selectedSource = map.getSource('selected-link') as maplibregl.GeoJSONSource | undefined;
   const selected = links.filter((link) => link.id === selectedLinkId);
   selectedSource?.setData(linksToGeoJson(selected, lanes) as never);
+}
+
+function syncRouteData(
+  map: maplibregl.Map,
+  links: FibreLink[],
+  overlay: MapRouteOverlay | null,
+) {
+  const lanes = linkParallelLanes(links);
+  const routeSource = map.getSource('route-links') as maplibregl.GeoJSONSource | undefined;
+  const routeLinks = overlay
+    ? links.filter((link) => overlay.linkIds.includes(link.id))
+    : [];
+  routeSource?.setData(linksToGeoJson(routeLinks, lanes) as never);
+
+  const dropSource = map.getSource('route-drop') as maplibregl.GeoJSONSource | undefined;
+  const dropFeatures = (overlay?.drops ?? [])
+    .filter((drop) => drop.coordinates.length > 1)
+    .map((drop) => ({
+      type: 'Feature' as const,
+      properties: {},
+      geometry: { type: 'LineString' as const, coordinates: drop.coordinates },
+    }));
+  dropSource?.setData(
+    (dropFeatures.length ? { type: 'FeatureCollection', features: dropFeatures } : EMPTY) as never,
+  );
 }
 
 /** Lucide-style icon markup shared by the device pins. */
@@ -637,6 +744,8 @@ export function NetworkMap({
   mode,
   selectedTjId,
   selectedLinkId,
+  selectedOltId = null,
+  selectedOnuId = null,
   focus,
   initialView,
   initialBounds,
@@ -663,9 +772,22 @@ export function NetworkMap({
   onConnectDevice,
   onPickConnectPort,
   onCancelConnectTarget,
+  routeOverlay = null,
+  onRouteDevice,
+  selectedDeviceIds,
+  onToggleSelectDevice,
+  onSelectDevicesInBox,
 }: NetworkMapProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
+  const [selectionBox, setSelectionBox] = useState<{
+    startX: number;
+    startY: number;
+    currentX: number;
+    currentY: number;
+  } | null>(null);
+  const devicesRef = useRef({ tjs, olts, onus });
+  devicesRef.current = { tjs, olts, onus };
   const markerRef = useRef<Map<string, maplibregl.Marker>>(new Map());
   const oltMarkerRef = useRef<Map<string, maplibregl.Marker>>(new Map());
   const onuMarkerRef = useRef<Map<string, maplibregl.Marker>>(new Map());
@@ -674,6 +796,9 @@ export function NetworkMap({
   const routeMarkerRef = useRef<maplibregl.Marker[]>([]);
   const drawCursorRef = useRef<{ lng: number; lat: number } | null>(null);
   const pinnedMarkerRef = useRef<maplibregl.Marker | null>(null);
+  const routeStartMarkerRef = useRef<maplibregl.Marker | null>(null);
+  const routeTargetMarkerRef = useRef<maplibregl.Marker | null>(null);
+  const routeOverlayRef = useRef<MapRouteOverlay | null>(routeOverlay);
   const { resolvedTheme } = useTheme();
   const [ready, setReady] = useState(false);
   const [styleVersion, setStyleVersion] = useState(0);
@@ -892,15 +1017,39 @@ export function NetworkMap({
   const measureRenderModeRef = useRef<MeasureMode>(measureRenderMode);
   measureRenderModeRef.current = measureRenderMode;
 
-  const callbacks = useRef({ onSelectTj, onSelectLink, onSelectOlt, onSelectOnu, onMapClick, onBackgroundClick, onConnectDevice });
+  const callbacks = useRef({
+    onSelectTj,
+    onSelectLink,
+    onSelectOlt,
+    onSelectOnu,
+    onMapClick,
+    onBackgroundClick,
+    onConnectDevice,
+    onRouteDevice,
+    onToggleSelectDevice,
+    onSelectDevicesInBox,
+  });
   const drawCallbacks = useRef({ onDrawPoint, onMoveDrawPoint, onFinishDraw });
   drawCallbacks.current = { onDrawPoint, onMoveDrawPoint, onFinishDraw };
   modeRef.current = mode;
   linksRef.current = viewLinks;
   selectedLinkRef.current = selectedLinkId;
-  callbacks.current = { onSelectTj, onSelectLink, onSelectOlt, onSelectOnu, onMapClick, onBackgroundClick, onConnectDevice };
+  callbacks.current = {
+    onSelectTj,
+    onSelectLink,
+    onSelectOlt,
+    onSelectOnu,
+    onMapClick,
+    onBackgroundClick,
+    onConnectDevice,
+    onRouteDevice,
+    onToggleSelectDevice,
+    onSelectDevicesInBox,
+  };
+  routeOverlayRef.current = routeOverlay;
 
   const VIEW_KEY = 'fibreAtlas.mapView';
+  const frameKeyRef = useRef<string>('default');
 
   function loadSavedView() {
     if (typeof window === 'undefined') return null;
@@ -909,7 +1058,7 @@ export function NetworkMap({
       if (!raw) return null;
       const v = JSON.parse(raw);
       if (v && typeof v.lng === 'number' && typeof v.lat === 'number' && typeof v.zoom === 'number') {
-        return { lng: v.lng, lat: v.lat, zoom: v.zoom };
+        return { lng: v.lng, lat: v.lat, zoom: v.zoom, scope: typeof v.scope === 'string' ? v.scope : null };
       }
     } catch {
       // ignore corrupt storage
@@ -920,7 +1069,7 @@ export function NetworkMap({
   function saveView(lng: number, lat: number, zoom: number) {
     if (typeof window === 'undefined') return;
     try {
-      localStorage.setItem(VIEW_KEY, JSON.stringify({ lng, lat, zoom }));
+      localStorage.setItem(VIEW_KEY, JSON.stringify({ lng, lat, zoom, scope: frameKeyRef.current }));
     } catch {
       // ignore storage errors
     }
@@ -941,13 +1090,14 @@ export function NetworkMap({
       center: [savedView?.lng ?? 90.28, savedView?.lat ?? 23.75],
       zoom: savedView?.zoom ?? 6.3,
       minZoom: 5,
-      maxZoom: 18,
+      maxZoom: 20,
       maxBounds: [
         [84.5, 18.2],
         [96.5, 28.6],
       ],
       attributionControl: false,
       dragRotate: false,
+      boxZoom: false,
     });
 
     mapRef.current = map;
@@ -972,6 +1122,7 @@ export function NetworkMap({
       try {
         addNetworkLayers(map, darkLayersRef.current);
         syncLinkData(map, linksRef.current, selectedLinkRef.current);
+        syncRouteData(map, linksRef.current, routeOverlayRef.current);
         syncDraftData(map, drawPathRef.current, null);
         syncMeasureData(map, measurePointsRef.current, null, measureRenderModeRef.current);
       } catch (error) {
@@ -987,6 +1138,7 @@ export function NetworkMap({
       try {
         addNetworkLayers(map, darkLayersRef.current);
         syncLinkData(map, linksRef.current, selectedLinkRef.current);
+        syncRouteData(map, linksRef.current, routeOverlayRef.current);
         syncDraftData(map, drawPathRef.current, null);
         syncMeasureData(map, measurePointsRef.current, null, measureRenderModeRef.current);
       } catch (error) {
@@ -1023,6 +1175,10 @@ export function NetworkMap({
       }
       if (modeRef.current === 'connect') {
         drawCallbacks.current.onDrawPoint?.({ lng: event.lngLat.lng, lat: event.lngLat.lat });
+        return;
+      }
+      if (modeRef.current === 'route') {
+        callbacks.current.onMapClick({ lng: event.lngLat.lng, lat: event.lngLat.lat });
         return;
       }
       if (
@@ -1104,7 +1260,78 @@ export function NetworkMap({
     };
     window.addEventListener('mouseup', finishLinkDrag);
 
+    let boxSelectStart: { x: number; y: number } | null = null;
+    let boxSelectMoved = false;
+
+    const handleBoxSelectMouseDown = (event: maplibregl.MapMouseEvent) => {
+      const isSelectMode = modeRef.current === 'select';
+      const isShift = event.originalEvent.shiftKey;
+      if (!isSelectMode && !isShift) return;
+
+      map.dragPan.disable();
+      boxSelectStart = { x: event.point.x, y: event.point.y };
+      boxSelectMoved = false;
+    };
+    map.on('mousedown', handleBoxSelectMouseDown);
+
+    const finishBoxSelect = (event: MouseEvent) => {
+      if (!boxSelectStart) return;
+      const start = boxSelectStart;
+      boxSelectStart = null;
+      setSelectionBox(null);
+      map.dragPan.enable();
+
+      if (!boxSelectMoved) return;
+
+      const rect = map.getContainer().getBoundingClientRect();
+      const currentX = event.clientX - rect.left;
+      const currentY = event.clientY - rect.top;
+
+      const p1 = map.unproject([Math.min(start.x, currentX), Math.min(start.y, currentY)]);
+      const p2 = map.unproject([Math.max(start.x, currentX), Math.max(start.y, currentY)]);
+      const minLng = Math.min(p1.lng, p2.lng);
+      const maxLng = Math.max(p1.lng, p2.lng);
+      const minLat = Math.min(p1.lat, p2.lat);
+      const maxLat = Math.max(p1.lat, p2.lat);
+
+      const inside: Array<{ kind: DeviceKind; id: string }> = [];
+      devicesRef.current.tjs.forEach((tj) => {
+        if (tj.lat >= minLat && tj.lat <= maxLat && tj.lng >= minLng && tj.lng <= maxLng) {
+          inside.push({ kind: 'tj', id: tj.id });
+        }
+      });
+      devicesRef.current.olts.forEach((olt) => {
+        if (olt.lat !== null && olt.lng !== null && olt.lat >= minLat && olt.lat <= maxLat && olt.lng >= minLng && olt.lng <= maxLng) {
+          inside.push({ kind: 'olt', id: olt.id });
+        }
+      });
+      devicesRef.current.onus.forEach((onu) => {
+        if (onu.lat !== null && onu.lng !== null && onu.lat >= minLat && onu.lat <= maxLat && onu.lng >= minLng && onu.lng <= maxLng) {
+          inside.push({ kind: 'onu', id: onu.id });
+        }
+      });
+
+      if (inside.length > 0) {
+        callbacks.current.onSelectDevicesInBox?.(inside, true);
+      }
+    };
+    window.addEventListener('mouseup', finishBoxSelect);
+
     map.on('mousemove', (event) => {
+      if (boxSelectStart) {
+        const dx = Math.abs(event.point.x - boxSelectStart.x);
+        const dy = Math.abs(event.point.y - boxSelectStart.y);
+        if (dx > 4 || dy > 4) {
+          boxSelectMoved = true;
+          setSelectionBox({
+            startX: boxSelectStart.x,
+            startY: boxSelectStart.y,
+            currentX: event.point.x,
+            currentY: event.point.y,
+          });
+        }
+        return;
+      }
       const activeLinkDrag = linkDragRef.current;
       if (activeLinkDrag) {
         const link = linksRef.current.find((item) => item.id === activeLinkDrag.id);
@@ -1155,7 +1382,8 @@ export function NetworkMap({
         modeRef.current === 'add-tj' ||
         modeRef.current === 'add-cut-tj' ||
         modeRef.current === 'add-olt' ||
-        modeRef.current === 'add-onu'
+        modeRef.current === 'add-onu' ||
+        modeRef.current === 'route'
       ) {
         map.getCanvas().style.cursor = 'crosshair';
         return;
@@ -1172,6 +1400,8 @@ export function NetworkMap({
       disposed = true;
       if (saveThrottle) clearTimeout(saveThrottle);
       window.removeEventListener('mouseup', finishLinkDrag);
+      window.removeEventListener('mouseup', finishBoxSelect);
+      map.off('mousedown', handleBoxSelectMouseDown);
       map.off('moveend', onViewChange);
       map.off('zoomend', onViewChange);
       cancelAnimationFrame(rafId);
@@ -1209,14 +1439,20 @@ export function NetworkMap({
   // changes never move the camera, so it stays where the user left it until they
   // pan or zoom — switching to another area changes the scope and reframes.
   const frameKey = cameraScope ?? 'default';
+  frameKeyRef.current = frameKey;
 
   // Frame the selected area exactly: its own joints plus OLTs, then its recorded
   // extent, then its parent district — the country only when no area is selected.
+  // A view saved for this same area wins instead, so a hard refresh lands on the
+  // exact centre and zoom the user left rather than a recomputed fit.
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !ready || !viewReady) return;
     if (framedRef.current?.map === map && framedRef.current.key === frameKey) return;
     framedRef.current = { map, key: frameKey };
+
+    const saved = loadSavedView();
+    if (saved && saved.scope === frameKey) return;
 
     if (initialBounds) {
       map.fitBounds(
@@ -1230,21 +1466,19 @@ export function NetworkMap({
           duration: 0,
         },
       );
-      return;
-    }
-
-    if (initialView) {
+    } else if (initialView) {
       map.jumpTo({ center: [initialView.lng, initialView.lat], zoom: initialView.zoom });
-      return;
+    } else {
+      map.fitBounds(
+        [
+          [87.9, 20.7],
+          [92.8, 26.9],
+        ],
+        { padding: { top: 70, bottom: 110, left: 70, right: 70 }, duration: 0 },
+      );
     }
-
-    map.fitBounds(
-      [
-        [87.9, 20.7],
-        [92.8, 26.9],
-      ],
-      { padding: { top: 70, bottom: 110, left: 70, right: 70 }, duration: 0 },
-    );
+    const centre = map.getCenter();
+    saveView(centre.lng, centre.lat, map.getZoom());
     // Deliberately keyed on the scope only: re-running on every data refresh would
     // yank a camera the user has moved. The first resolved extent wins per area.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1281,6 +1515,85 @@ export function NetworkMap({
     if (!map || !ready) return;
     syncLinkData(map, viewLinks, selectedLinkId);
   }, [viewLinks, selectedLinkId, ready, styleVersion]);
+
+  // Route highlight and final-approach line.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !ready) return;
+    syncRouteData(map, viewLinks, routeOverlay);
+  }, [viewLinks, routeOverlay, ready, styleVersion]);
+
+  // Pins for free-point route endpoints.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !ready) return;
+    routeStartMarkerRef.current?.remove();
+    routeStartMarkerRef.current = null;
+    routeTargetMarkerRef.current?.remove();
+    routeTargetMarkerRef.current = null;
+    const addPin = (
+      point: { lat: number; lng: number; label: string } | null,
+      tone: string,
+    ): maplibregl.Marker | null => {
+      if (!point) return null;
+      const element = document.createElement('div');
+      element.className = `flex -translate-y-1 items-center gap-1 rounded-full border border-white/80 px-2 py-0.5 text-[9.5px] font-semibold text-slate-950 shadow-[0_10px_24px_-10px_rgba(15,23,42,0.55)] ${tone}`;
+      element.innerHTML = `<span class="size-1.5 rounded-full bg-slate-950"></span>${escapeHtml(point.label)}`;
+      return new maplibregl.Marker({ element, anchor: 'bottom' })
+        .setLngLat([point.lng, point.lat])
+        .addTo(map);
+    };
+    routeStartMarkerRef.current = addPin(routeOverlay?.start ?? null, 'bg-emerald-400');
+    routeTargetMarkerRef.current = addPin(routeOverlay?.target ?? null, 'bg-amber-500');
+  }, [
+    routeOverlay?.start?.lat,
+    routeOverlay?.start?.lng,
+    routeOverlay?.start?.label,
+    routeOverlay?.target?.lat,
+    routeOverlay?.target?.lng,
+    routeOverlay?.target?.label,
+    ready,
+  ]);
+
+  // Frame a freshly computed route.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !ready || !routeOverlay) return;
+    const bounds = new maplibregl.LngLatBounds();
+    const extend = (lng: number, lat: number) => bounds.extend([lng, lat]);
+    routeOverlay.linkIds.forEach((id) => {
+      const link = viewLinks.find((item) => item.id === id);
+      if (!link) return;
+      extend(link.fromLng, link.fromLat);
+      extend(link.toLng, link.toLat);
+      (link.path ?? []).forEach((point) => extend(point.lng, point.lat));
+    });
+    // Street detours can be far longer than the cable path; only frame them when
+    // there is no cable span between the two snapped nodes.
+    if (routeOverlay.linkIds.length === 0) {
+      routeOverlay.drops.forEach((drop) => drop.coordinates.forEach(([lng, lat]) => extend(lng, lat)));
+    }
+    if (routeOverlay.start) extend(routeOverlay.start.lng, routeOverlay.start.lat);
+    if (routeOverlay.target) extend(routeOverlay.target.lng, routeOverlay.target.lat);
+    if (bounds.isEmpty()) return;
+    // Frame the path, then ease in past the fit so short spans read clearly.
+    const wide = window.innerWidth >= 768;
+    const padding = wide
+      ? { top: 60, bottom: 80, left: 80, right: 420 }
+      : { top: 60, bottom: 80, left: 40, right: 40 };
+    const camera = map.cameraForBounds(bounds, { padding, maxZoom: 20 });
+    if (camera) {
+      map.easeTo({
+        center: camera.center,
+        zoom: Math.min((camera.zoom ?? map.getZoom()) + 0.2, map.getMaxZoom()),
+        duration: 650,
+      });
+    } else {
+      map.fitBounds(bounds, { padding, maxZoom: 20, duration: 650 });
+    }
+    // `routeOverlay.signature` changes when the path, endpoints or street legs change.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [routeOverlay?.signature, ready]);
 
   // Draft route being drawn in the link dialog.
   useEffect(() => {
@@ -1470,6 +1783,10 @@ export function NetworkMap({
         element.addEventListener('click', (event) => {
           event.stopPropagation();
           if (dragged) return;
+          if (event.shiftKey || modeRef.current === 'select') {
+            callbacks.current.onToggleSelectDevice?.({ kind: 'tj', id: tj.id });
+            return;
+          }
           const position = marker?.getLngLat();
           const point = position
             ? { lat: position.lat, lng: position.lng }
@@ -1484,6 +1801,10 @@ export function NetworkMap({
           }
           if (modeRef.current === 'connect') {
             callbacks.current.onConnectDevice?.({ kind: 'tj', id: tj.id });
+            return;
+          }
+          if (modeRef.current === 'route') {
+            callbacks.current.onRouteDevice?.({ kind: 'tj', id: tj.id });
             return;
           }
           callbacks.current.onSelectTj(tj.id);
@@ -1548,10 +1869,12 @@ export function NetworkMap({
       element.classList.toggle('is-pon', isPon);
       element.style.setProperty('--core-color', primaryCore(tj.cores));
       element.innerHTML = buildMarkerContent(tj);
-      element.classList.toggle('is-selected', tj.id === selectedTjId);
-      element.style.zIndex = tj.id === selectedTjId ? '6' : '';
+      const isMulti = selectedDeviceIds?.has(tj.id) ?? false;
+      element.classList.toggle('is-multi-selected', isMulti);
+      element.classList.toggle('is-selected', tj.id === selectedTjId || isMulti);
+      element.style.zIndex = isMulti ? '10' : tj.id === selectedTjId ? '6' : '';
     });
-  }, [tjs, selectedTjId, ready, styleVersion, canDragDevice]);
+  }, [tjs, selectedTjId, selectedDeviceIds, ready, styleVersion, canDragDevice]);
 
   // Sync OLT cabinet markers.
   useEffect(() => {
@@ -1579,6 +1902,10 @@ export function NetworkMap({
         element.addEventListener('click', (event) => {
           event.stopPropagation();
           if (dragged) return;
+          if (event.shiftKey || modeRef.current === 'select') {
+            callbacks.current.onToggleSelectDevice?.({ kind: 'olt', id: olt.id });
+            return;
+          }
           const position = marker?.getLngLat();
           const point = position
             ? { lat: position.lat, lng: position.lng }
@@ -1593,6 +1920,10 @@ export function NetworkMap({
           }
           if (modeRef.current === 'connect') {
             callbacks.current.onConnectDevice?.({ kind: 'olt', id: olt.id });
+            return;
+          }
+          if (modeRef.current === 'route') {
+            callbacks.current.onRouteDevice?.({ kind: 'olt', id: olt.id });
             return;
           }
           callbacks.current.onSelectOlt(olt.id);
@@ -1648,8 +1979,12 @@ export function NetworkMap({
       const element = marker.getElement();
       element.innerHTML = buildOltMarkerContent(olt);
       element.setAttribute('aria-label', `${olt.code} — ${olt.name}`);
+      const isMulti = selectedDeviceIds?.has(olt.id) ?? false;
+      element.classList.toggle('is-multi-selected', isMulti);
+      element.classList.toggle('is-selected', olt.id === selectedOltId || isMulti);
+      element.style.zIndex = isMulti ? '10' : olt.id === selectedOltId ? '6' : '';
     });
-  }, [olts, ready, styleVersion, canDragDevice]);
+  }, [olts, selectedOltId, selectedDeviceIds, ready, styleVersion, canDragDevice]);
 
   // Sync ONU markers.
   useEffect(() => {
@@ -1672,11 +2007,18 @@ export function NetworkMap({
         const element = document.createElement('button');
         element.type = 'button';
         element.className = 'onu-marker';
-        element.setAttribute('aria-label', `ONU ${onu.username} — ${onu.fibreId}`);
+        element.setAttribute(
+          'aria-label',
+          `ONU ${onu.username}${onu.fibreId ? ` — ${onu.fibreId}` : ''}`,
+        );
         element.innerHTML = buildOnuMarkerContent(onu);
         element.addEventListener('click', (event) => {
           event.stopPropagation();
           if (dragged) return;
+          if (event.shiftKey || modeRef.current === 'select') {
+            callbacks.current.onToggleSelectDevice?.({ kind: 'onu', id: onu.id });
+            return;
+          }
           const position = marker?.getLngLat();
           const point = position
             ? { lat: position.lat, lng: position.lng }
@@ -1691,6 +2033,10 @@ export function NetworkMap({
           }
           if (modeRef.current === 'connect') {
             callbacks.current.onConnectDevice?.({ kind: 'onu', id: onu.id });
+            return;
+          }
+          if (modeRef.current === 'route') {
+            callbacks.current.onRouteDevice?.({ kind: 'onu', id: onu.id });
             return;
           }
           callbacks.current.onSelectOnu?.(onu.id);
@@ -1745,9 +2091,16 @@ export function NetworkMap({
 
       const element = marker.getElement();
       element.innerHTML = buildOnuMarkerContent(onu);
-      element.setAttribute('aria-label', `ONU ${onu.username} — ${onu.fibreId}`);
+      element.setAttribute(
+        'aria-label',
+        `ONU ${onu.username}${onu.fibreId ? ` — ${onu.fibreId}` : ''}`,
+      );
+      const isMulti = selectedDeviceIds?.has(onu.id) ?? false;
+      element.classList.toggle('is-multi-selected', isMulti);
+      element.classList.toggle('is-selected', onu.id === selectedOnuId || isMulti);
+      element.style.zIndex = isMulti ? '10' : onu.id === selectedOnuId ? '6' : '';
     });
-  }, [onus, ready, styleVersion, canDragDevice]);
+  }, [onus, selectedOnuId, selectedDeviceIds, ready, styleVersion, canDragDevice]);
 
   // Mid-span fibre labels. Markers are reused so dragging only moves them and
   // updates the live distance instead of rebuilding the overlay every frame.
@@ -1959,6 +2312,8 @@ export function NetworkMap({
       mode === 'add-olt' ||
       mode === 'add-onu' ||
       mode === 'draw-link' ||
+      mode === 'route' ||
+      mode === 'select' ||
       measureMode !== 'none'
         ? 'crosshair'
         : '';
@@ -1977,75 +2332,97 @@ export function NetworkMap({
     if (!pinnedLocation) return;
 
     const el = document.createElement('div');
-    el.className = 'location-pin-container';
-    el.innerHTML = `
-      <div class="location-pin-pulse"></div>
-      <div class="location-pin-marker" title="${escapeHtml(pinnedLocation.title)}">
-        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0Z"/>
-          <circle cx="12" cy="10" r="3"/>
-        </svg>
-      </div>
-      <div class="location-pin-card">
-        <div class="location-pin-card__header">
-          <div class="location-pin-card__title">${escapeHtml(pinnedLocation.title)}</div>
-          <button type="button" class="location-pin-card__close" aria-label="Dismiss pin" title="Dismiss pin">✕</button>
+    el.className = cn(
+      'location-pin-container',
+      pinnedLocation.pinOnly && 'location-pin-container--pin-only',
+    );
+
+    if (pinnedLocation.pinOnly) {
+      el.innerHTML = `
+        <div class="location-pin-pulse"></div>
+        <div class="location-pin-marker" title="${escapeHtml(pinnedLocation.title)}" style="cursor: pointer;">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0Z"/>
+            <circle cx="12" cy="10" r="3"/>
+          </svg>
         </div>
-        ${
-          pinnedLocation.subtitle
-            ? `<div class="location-pin-card__subtitle">${escapeHtml(pinnedLocation.subtitle)}</div>`
-            : ''
-        }
-        <div class="location-pin-card__coords">${pinnedLocation.lat.toFixed(5)}° N, ${pinnedLocation.lng.toFixed(5)}° E</div>
-        <div class="location-pin-card__actions">
-          <button type="button" class="location-pin-card__btn-add location-pin-card__btn-add-tj">
-            + Add TJ Here
-          </button>
-          <button type="button" class="location-pin-card__btn-add location-pin-card__btn-add-olt">
-            + Add OLT Here
-          </button>
-          <button type="button" class="location-pin-card__btn-add location-pin-card__btn-add-onu">
-            + Add ONU Here
-          </button>
+      `;
+
+      const pinMarker = el.querySelector('.location-pin-marker');
+      pinMarker?.addEventListener('click', (e) => {
+        e.stopPropagation();
+        onClearPinnedLocation?.();
+      });
+    } else {
+      el.innerHTML = `
+        <div class="location-pin-pulse"></div>
+        <div class="location-pin-marker" title="${escapeHtml(pinnedLocation.title)}">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0Z"/>
+            <circle cx="12" cy="10" r="3"/>
+          </svg>
         </div>
-      </div>
-    `;
+        <div class="location-pin-card">
+          <div class="location-pin-card__header">
+            <div class="location-pin-card__title">${escapeHtml(pinnedLocation.title)}</div>
+            <button type="button" class="location-pin-card__close" aria-label="Dismiss pin" title="Dismiss pin">✕</button>
+          </div>
+          ${
+            pinnedLocation.subtitle
+              ? `<div class="location-pin-card__subtitle">${escapeHtml(pinnedLocation.subtitle)}</div>`
+              : ''
+          }
+          <div class="location-pin-card__coords">${pinnedLocation.lat.toFixed(5)}° N, ${pinnedLocation.lng.toFixed(5)}° E</div>
+          <div class="location-pin-card__actions">
+            <button type="button" class="location-pin-card__btn-add location-pin-card__btn-add-tj">
+              + Add TJ Here
+            </button>
+            <button type="button" class="location-pin-card__btn-add location-pin-card__btn-add-olt">
+              + Add OLT Here
+            </button>
+            <button type="button" class="location-pin-card__btn-add location-pin-card__btn-add-onu">
+              + Add ONU Here
+            </button>
+          </div>
+        </div>
+      `;
 
-    const closeBtn = el.querySelector('.location-pin-card__close');
-    closeBtn?.addEventListener('click', (e) => {
-      e.stopPropagation();
-      onClearPinnedLocation?.();
-    });
-
-    const addTjBtn = el.querySelector('.location-pin-card__btn-add-tj');
-    addTjBtn?.addEventListener('click', (e) => {
-      e.stopPropagation();
-      onAddTjAtPinnedLocation?.({
-        lat: pinnedLocation.lat,
-        lng: pinnedLocation.lng,
-        address: pinnedLocation.title,
+      const closeBtn = el.querySelector('.location-pin-card__close');
+      closeBtn?.addEventListener('click', (e) => {
+        e.stopPropagation();
+        onClearPinnedLocation?.();
       });
-    });
 
-    const addOltBtn = el.querySelector('.location-pin-card__btn-add-olt');
-    addOltBtn?.addEventListener('click', (e) => {
-      e.stopPropagation();
-      onAddOltAtPinnedLocation?.({
-        lat: pinnedLocation.lat,
-        lng: pinnedLocation.lng,
-        address: pinnedLocation.title,
+      const addTjBtn = el.querySelector('.location-pin-card__btn-add-tj');
+      addTjBtn?.addEventListener('click', (e) => {
+        e.stopPropagation();
+        onAddTjAtPinnedLocation?.({
+          lat: pinnedLocation.lat,
+          lng: pinnedLocation.lng,
+          address: pinnedLocation.title,
+        });
       });
-    });
 
-    const addOnuBtn = el.querySelector('.location-pin-card__btn-add-onu');
-    addOnuBtn?.addEventListener('click', (e) => {
-      e.stopPropagation();
-      onAddOnuAtPinnedLocation?.({
-        lat: pinnedLocation.lat,
-        lng: pinnedLocation.lng,
-        address: pinnedLocation.title,
+      const addOltBtn = el.querySelector('.location-pin-card__btn-add-olt');
+      addOltBtn?.addEventListener('click', (e) => {
+        e.stopPropagation();
+        onAddOltAtPinnedLocation?.({
+          lat: pinnedLocation.lat,
+          lng: pinnedLocation.lng,
+          address: pinnedLocation.title,
+        });
       });
-    });
+
+      const addOnuBtn = el.querySelector('.location-pin-card__btn-add-onu');
+      addOnuBtn?.addEventListener('click', (e) => {
+        e.stopPropagation();
+        onAddOnuAtPinnedLocation?.({
+          lat: pinnedLocation.lat,
+          lng: pinnedLocation.lng,
+          address: pinnedLocation.title,
+        });
+      });
+    }
 
     const marker = new maplibregl.Marker({
       element: el,
@@ -2139,11 +2516,11 @@ export function NetworkMap({
                         {group.name}
                       </p>
                     ) : null}
-                    {group.ports.map((port) => (
+                    {group.ports.map((port, portIndex) => (
                       <button
-                        key={port.label}
+                        key={`${group.name ?? `ports-${groupIndex}`}-${portIndex}`}
                         type="button"
-                        aria-label={`${connectTarget.code} port ${port.label}`}
+                        aria-label={`${connectTarget.code} port ${port.name ?? port.label}`}
                         disabled={port.used}
                         onClick={() => onPickConnectPort?.(port.label)}
                         className={cn(
@@ -2160,8 +2537,11 @@ export function NetworkMap({
                           )}
                           style={port.color ? { backgroundColor: port.color } : undefined}
                         />
-                        <span className="min-w-0 flex-1 truncate font-mono text-[10.5px] font-semibold">
-                          {port.label}
+                        <span
+                          className="min-w-0 flex-1 truncate font-mono text-[10.5px] font-semibold"
+                          title={port.name && port.name !== port.label ? `Port ${port.label}` : undefined}
+                        >
+                          {port.name ?? port.label}
                         </span>
                         <span className="max-w-[86px] truncate text-[8.5px] text-muted-foreground">
                           {port.hint}
@@ -2199,6 +2579,17 @@ export function NetworkMap({
           onStart={startMeasure}
           onUndo={undoMeasure}
           onClear={clearMeasure}
+        />
+      ) : null}
+      {selectionBox ? (
+        <div
+          className="pointer-events-none absolute z-30 rounded border-2 border-dashed border-rose-500 bg-rose-500/20 backdrop-blur-[0.5px]"
+          style={{
+            left: Math.min(selectionBox.startX, selectionBox.currentX),
+            top: Math.min(selectionBox.startY, selectionBox.currentY),
+            width: Math.abs(selectionBox.currentX - selectionBox.startX),
+            height: Math.abs(selectionBox.currentY - selectionBox.startY),
+          }}
         />
       ) : null}
       {!ready ? (

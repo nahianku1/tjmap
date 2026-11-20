@@ -130,12 +130,41 @@ export interface DistrictInput {
 
 export type AreaInput = DistrictInput;
 
+/** A placement zone inside a service area; devices and links can be filed under one. */
+export interface SubArea {
+  id: string;
+  areaId: string;
+  areaName: string;
+  districtId: string;
+  districtName: string;
+  code: string | null;
+  name: string;
+  description: string | null;
+  tjCount: number;
+  oltCount: number;
+  onuCount: number;
+  linkCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type SubAreaInput = DistrictInput;
+
+/** What the server deleted together with a sub-area. */
+export interface SubAreaDeleteResult {
+  ok: boolean;
+  id: string;
+  removed?: { tjs: number; olts: number; onus: number; links: number };
+}
+
 export type EthernetSpeed = '1G' | '10G' | '40G' | '100G';
 
 export type PortStatus = 'free' | 'in_use';
 
 export interface PonPort {
   label: string;
+  /** Optional friendly name, e.g. "Gulshan feeder"; the label stays the hardware port id. */
+  name?: string | null;
   outputDbm: number | null;
   /** Optional service VLAN assigned to this port (1–4094). */
   vlanId?: number | null;
@@ -161,9 +190,13 @@ export interface Olt {
   uplinkPort: string | null;
   ponPorts: PonPort[];
   ethernetPorts: EthernetPort[];
+  /** Feed cable patched into the cabinet; null until set manually or from a link. */
+  fibreId: string | null;
   notes: string | null;
   areaId: string | null;
   areaName: string | null;
+  subAreaId?: string | null;
+  subAreaName?: string | null;
   districtId: string | null;
   districtName: string | null;
   lat: number | null;
@@ -180,7 +213,9 @@ export interface OltInput {
   uplinkPort?: string;
   ponPorts?: PonPort[];
   ethernetPorts?: EthernetPort[];
+  fibreId?: string | null;
   areaId?: string | null;
+  subAreaId?: string | null;
   lat?: number;
   lng?: number;
   notes?: string;
@@ -219,6 +254,8 @@ export interface Tj {
   ponData?: PonData | null;
   areaId: string | null;
   areaName: string | null;
+  subAreaId?: string | null;
+  subAreaName?: string | null;
   districtId: string | null;
   districtName: string | null;
   oltId: string | null;
@@ -288,6 +325,8 @@ export interface FibreLink {
   cores: LinkCore[];
   /** Duct waypoints drawn on the map; empty means a straight span. */
   path: LinkPathPoint[];
+  subAreaId?: string | null;
+  subAreaName?: string | null;
   status: LinkStatus;
   lengthM: number | null;
   /** Fibre attenuation at the working wavelength, in dB per kilometre. */
@@ -316,7 +355,7 @@ export interface Onu {
   username: string;
   macAddress?: string | null;
   vlanId?: number | null;
-  fibreId: string;
+  fibreId: string | null;
   ponType: PonType;
   onuClass: OnuClass;
   cores: OnuCore[];
@@ -325,6 +364,8 @@ export interface Onu {
   lng: number | null;
   areaId?: string | null;
   areaName?: string | null;
+  subAreaId?: string | null;
+  subAreaName?: string | null;
   districtId?: string | null;
   districtName?: string | null;
   createdAt?: string;
@@ -335,11 +376,12 @@ export interface OnuInput {
   username: string;
   macAddress?: string;
   vlanId?: number | null;
-  fibreId?: string;
+  fibreId?: string | null;
   ponType?: PonType;
   onuClass?: OnuClass;
   cores: OnuCore[];
   areaId?: string | null;
+  subAreaId?: string | null;
   lat?: number;
   lng?: number;
   notes?: string;
@@ -350,6 +392,8 @@ export interface Network {
   links: FibreLink[];
   olts: Olt[];
   onus?: Onu[];
+  /** Present on area networks: the sub-areas devices can be filed under. */
+  subAreas?: SubArea[];
 }
 
 export interface AuthResponse {
@@ -380,6 +424,7 @@ export interface TjInput {
   cutData?: CutData | null;
   ponData?: PonData | null;
   areaId?: string | null;
+  subAreaId?: string | null;
   oltId?: string | null;
 }
 
@@ -396,6 +441,7 @@ export interface LinkInput {
   toCoreLabel?: string | null;
   coreCount: number;
   status: LinkStatus;
+  subAreaId?: string | null;
   notes?: string;
   attenuationDbPerKm?: number;
   spliceCount?: number;

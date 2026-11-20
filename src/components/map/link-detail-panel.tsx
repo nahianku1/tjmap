@@ -6,6 +6,7 @@ import {
   Cable,
   CheckCircle2,
   Copy,
+  Layers,
   Link2,
   MapPin,
   Pencil,
@@ -33,7 +34,7 @@ import { Badge } from '@/components/ui/badge';
 import { Separator } from '@/components/ui/separator';
 import type { DeviceKind, FibreLink } from '@/lib/types';
 import { computeSpanLoss } from '@/lib/power-budget';
-import { coreInTubeOf, tiaCoreName, tubeCoreLabel, tubeOf } from '@/lib/fibre-cores';
+import { displayCoreLabel, tubeOf } from '@/lib/fibre-cores';
 import { cn, formatDistance } from '@/lib/utils';
 
 interface LinkDetailPanelProps {
@@ -169,6 +170,18 @@ export function LinkDetailPanel({
                 />
               </div>
 
+              {link.subAreaName ? (
+                <div className="flex items-center gap-2 rounded-2xl border border-white/60 bg-white/45 px-3 py-2 dark:border-white/10 dark:bg-white/[0.03]">
+                  <Layers className="size-3.5 shrink-0 text-teal-500" />
+                  <span className="shrink-0 text-[9px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">
+                    Sub-area
+                  </span>
+                  <span className="ml-auto min-w-0 truncate text-[11px] font-semibold text-primary/90">
+                    {link.subAreaName}
+                  </span>
+                </div>
+              ) : null}
+
               {/* OPTICAL LINK LOSS */}
               {spanLoss ? (
                 <section className="rounded-2xl border border-amber-500/25 bg-amber-500/[0.04] p-3">
@@ -272,20 +285,12 @@ export function LinkDetailPanel({
                               className="size-3 shrink-0 rounded-full border border-white/70 shadow-[0_0_10px] dark:border-slate-900"
                               style={{ backgroundColor: core.color || '#22d3ee', color: core.color || '#22d3ee' }}
                             />
-                            <span className="min-w-0 flex-1 truncate text-[11.5px] font-medium">
-                              {core.label || `Core ${index + 1}`}
+                            <span
+                              className="min-w-0 flex-1 truncate text-[11.5px] font-medium"
+                              title={`Cable core ${Number(core.index) || index + 1}`}
+                            >
+                              {displayCoreLabel(core.label, Number(core.index) || index + 1)}
                             </span>
-                            {(() => {
-                              const strand = Number(core.index) || index + 1;
-                              return (
-                                <span
-                                  className="shrink-0 rounded bg-muted/70 px-1.5 py-0.5 font-mono text-[9px] font-semibold text-foreground/80"
-                                  title={`Tube ${tubeOf(strand)} · core ${coreInTubeOf(strand)} · ${tiaCoreName(strand)}`}
-                                >
-                                  {tubeCoreLabel(strand)}
-                                </span>
-                              );
-                            })()}
                             <span
                               className={cn(
                                 'inline-flex items-center rounded-md px-1.5 py-0.5 text-[9.5px] font-semibold',
@@ -310,7 +315,9 @@ export function LinkDetailPanel({
                                   core.fromCoreLabel ? 'text-foreground/80' : 'text-muted-foreground',
                                 )}
                               >
-                                {core.fromCoreLabel ?? 'unpatched'}
+                                {core.fromCoreLabel
+                                  ? displayCoreLabel(core.fromCoreLabel)
+                                  : 'unpatched'}
                               </p>
                             </div>
                             <ArrowRight className="size-3 shrink-0 text-muted-foreground" />
@@ -325,7 +332,9 @@ export function LinkDetailPanel({
                                   core.toCoreLabel ? 'text-foreground/80' : 'text-muted-foreground',
                                 )}
                               >
-                                {core.toCoreLabel ?? 'unpatched'}
+                                {core.toCoreLabel
+                                  ? displayCoreLabel(core.toCoreLabel)
+                                  : 'unpatched'}
                               </p>
                             </div>
                           </div>

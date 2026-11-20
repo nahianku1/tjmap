@@ -14,7 +14,7 @@ import {
 import { Input } from '@/components/ui/input';
 import { api, ApiError } from '@/lib/api';
 import type { DeviceKind, FibreLink, LinkCore } from '@/lib/types';
-import { tiaCoreName, tubeOf } from '@/lib/fibre-cores';
+import { displayCoreLabel, tubeOf } from '@/lib/fibre-cores';
 import { CoreDot } from './core-dot';
 
 interface FibreCorePickerProps {
@@ -93,7 +93,7 @@ export function FibreCorePicker({ kind, deviceId, links, onPatched }: FibreCoreP
       const saved = await api.updateLink(link.id, { cores });
       setSavedCores((previous) => ({ ...previous, [link.id]: saved.cores ?? cores }));
       const landed = targetLabel
-        ? `moved to ${targetLabel} on ${saved.fibreId}`
+        ? `moved to ${displayCoreLabel(targetLabel)} on ${saved.fibreId}`
         : `unpatched from ${saved.fibreId}`;
       toast.success(`${kind.toUpperCase()} ${landed}`, {
         description:
@@ -163,15 +163,14 @@ export function FibreCorePicker({ kind, deviceId, links, onPatched }: FibreCoreP
               <SelectTrigger aria-label={`Core on ${link.fibreId}`} className="h-9 w-[168px] font-mono text-[11px]">
                 <span className="flex min-w-0 items-center gap-1.5">
                   <CoreDot color={current?.color} />
-                  <span className="truncate">{current?.label ?? 'Unpatched'}</span>
-                  {current ? (
-                    <span
-                      className="shrink-0 rounded bg-muted/70 px-1 text-[8.5px] font-semibold text-muted-foreground"
-                      title={`Tube ${tubeOf(Number(current.index) || cores.indexOf(current) + 1)}`}
-                    >
-                      T{tubeOf(Number(current.index) || cores.indexOf(current) + 1)}
-                    </span>
-                  ) : null}
+                  <span className="truncate">
+                    {current
+                      ? displayCoreLabel(
+                          current.label,
+                          Number(current.index) || cores.indexOf(current) + 1,
+                        )
+                      : 'Unpatched'}
+                  </span>
                 </span>
               </SelectTrigger>
               <SelectContent className="max-h-72">
@@ -199,9 +198,11 @@ export function FibreCorePicker({ kind, deviceId, links, onPatched }: FibreCoreP
                         >
                           <span className="inline-flex items-center gap-1.5">
                             <CoreDot color={core.color} />
-                            <span>{core.label}</span>
-                            <span className="text-[9px] text-muted-foreground">
-                              {tiaCoreName(Number(core.index) || position + 1)}
+                            <span>
+                              {displayCoreLabel(
+                                core.label,
+                                Number(core.index) || position + 1,
+                              )}
                             </span>
                             {Number(core.lossDb ?? 0) > 0 ? (
                               <span className="text-[9px] text-amber-600 dark:text-amber-400">
@@ -222,7 +223,11 @@ export function FibreCorePicker({ kind, deviceId, links, onPatched }: FibreCoreP
               </SelectContent>
             </Select>
             <Input
-              aria-label={`Extra loss on ${link.fibreId} ${current?.label ?? 'core'}`}
+              aria-label={`Extra loss on ${link.fibreId} ${
+                current
+                  ? displayCoreLabel(current.label, Number(current.index) || cores.indexOf(current) + 1)
+                  : 'core'
+              }`}
               inputMode="decimal"
               disabled={busy === link.id || !current}
               defaultValue={current ? String(Number(current.lossDb ?? 0)) : '0'}
