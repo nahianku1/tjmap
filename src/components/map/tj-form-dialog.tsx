@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import {
   Activity,
   AlertTriangle,
+  ArrowRightLeft,
   Box,
   Cable,
   CheckCircle2,
@@ -73,7 +74,6 @@ import {
   findUpstreamPower,
   getTjInputCoreLabel,
 } from '@/lib/core-power';
-import { FibreCorePicker } from '@/components/map/fibre-core-picker';
 import { SubAreaDialog } from '@/components/directory/sub-area-dialog';
 import { TjFrontPanel } from '@/components/tj/tj-front-panel';
 import { cn } from '@/lib/utils';
@@ -530,6 +530,16 @@ export function TjFormDialog({
   const [error, setError] = useState<string | null>(null);
   const [splitterError, setSplitterError] = useState<string | null>(null);
   const [subAreaFormOpen, setSubAreaFormOpen] = useState(false);
+  // Output core moves are queued per splitter and applied with the save, so
+  // cancelling the edit leaves the joint untouched.
+  const [coreChange, setCoreChange] = useState<{
+    scope: number;
+    fromLabel: string;
+    toLabel: string;
+  } | null>(null);
+  const [coreMoves, setCoreMoves] = useState<
+    { scope: number; fromLabel: string; toLabel: string }[]
+  >([]);
 
   // Closing through Cancel, the X, the overlay or Escape discards the draft so
   // the next open rebuilds the form from the joint (or an empty one).
@@ -540,6 +550,8 @@ export function TjFormDialog({
     setError(null);
     setSplitterError(null);
     setSubAreaFormOpen(false);
+    setCoreChange(null);
+    setCoreMoves([]);
   }, [open]);
 
   useEffect(() => {
@@ -570,6 +582,8 @@ export function TjFormDialog({
     if (!open) return;
     setError(null);
     setSplitterError(null);
+    setCoreChange(null);
+    setCoreMoves([]);
     if (initial) {
       const tjType = initial.tjType ?? (initial.isCut ? 'cut' : 'box');
       const splitterEnabled = initial.splitter?.enabled ?? false;
@@ -761,6 +775,9 @@ export function TjFormDialog({
   });
   const feedDisplayName = (label: string | null | undefined) =>
     label ? feedNames[label] ?? displayCoreLabel(label) : '';
+  const changeSource = coreChange
+    ? outputsForScope(coreChange.scope).find((core) => core.label === coreChange.fromLabel) ?? null
+    : null;
 
   // Keep every splitter leg's stored power in step with the auto-derived output.
   useEffect(() => {
@@ -948,6 +965,14 @@ export function TjFormDialog({
       updatedFibres = form.userFibres.map((uf) =>
         uf.outputCoreLabel === oldCore.label ? { ...uf, outputCoreLabel: patchVal.label! } : uf,
       );
+      // A queued move follows its core when the label is renamed.
+      setCoreMoves((moves) =>
+        moves.map((move) => ({
+          ...move,
+          fromLabel: move.fromLabel === oldCore.label ? patchVal.label! : move.fromLabel,
+          toLabel: move.toLabel === oldCore.label ? patchVal.label! : move.toLabel,
+        })),
+      );
     }
 
     patch({
@@ -962,6 +987,11 @@ export function TjFormDialog({
 
     const newOutputs = form.outputCores.filter((_, i) => i !== index);
     const newFibres = form.userFibres.filter((uf) => uf.outputCoreLabel !== removedCore.label);
+    setCoreMoves((moves) =>
+      moves.filter(
+        (move) => move.fromLabel !== removedCore.label && move.toLabel !== removedCore.label,
+      ),
+    );
 
     patch({
       outputCores: newOutputs,
@@ -1370,6 +1400,16 @@ export function TjFormDialog({
    * fibre attached to that leg, mirroring the primary output core behaviour.
    */
   function updateExtraOutput(splitterIndex: number, outputIndex: number, patchVal: Partial<Core>) {
+    const previousLabel = form.extraSplitters[splitterIndex]?.outputs[outputIndex]?.label;
+    if (patchVal.label && previousLabel && patchVal.label !== previousLabel) {
+      setCoreMoves((moves) =>
+        moves.map((move) => ({
+          ...move,
+          fromLabel: move.fromLabel === previousLabel ? patchVal.label! : move.fromLabel,
+          toLabel: move.toLabel === previousLabel ? patchVal.label! : move.toLabel,
+        })),
+      );
+    }
     setForm((current) => {
       const oldCore = current.extraSplitters[splitterIndex]?.outputs[outputIndex];
       if (!oldCore) return current;
@@ -1409,6 +1449,9 @@ export function TjFormDialog({
     setForm((current) => {
       const removed = current.extraSplitters[splitterIndex]?.outputs[outputIndex];
       if (!removed) return current;
+      setCoreMoves((moves) =>
+        moves.filter((move) => move.fromLabel !== removed.label && move.toLabel !== removed.label),
+      );
       return {
         ...current,
         userFibres: current.userFibres.filter((uf) => uf.outputCoreLabel !== removed.label),
@@ -1442,6 +1485,77 @@ export function TjFormDialog({
         };
       }),
     }));
+  }
+
+  /** Output cores of one splitter: scope 0 is splitter 1, 1+ are the extras. */
+  function outputsForScope(scope: number): Core[] {
+    if (scope === 0) return form.outputCores;
+    return form.extraSplitters[scope - 1]?.outputs ?? [];
+  }
+
+  function splitterLabelForScope(scope: number): string {
+    return `Splitter ${scope + 1}`;
+  }
+
+  /** Every splitter's legs, grouped for the joint-wide move picker. */
+  function outputCoreGroups(): { scope: number; label: string; cores: Core[] }[] {
+    return [
+      { scope: 0, label: 'Splitter 1', cores: form.outputCores },
+      ...form.extraSplitters.map((extra, index) => ({
+        scope: index + 1,
+        label: `Splitter ${index + 2}`,
+        cores: extra.outputs,
+      })),
+    ].filter((group) => group.cores.length > 0);
+  }
+
+  /** Free legs across every splitter of this joint that a faulty core can use. */
+  function coreMoveTargets(fromLabel: string) {
+    return outputCoreGroups().flatMap((group) =>
+      group.cores
+        .filter(
+          (core) =>
+            core.label !== fromLabel &&
+            (core.status ?? 'free') === 'free' &&
+            !core.connectedLinkId &&
+            !core.connectedUserFibreId &&
+            !coreMoves.some(
+              (move) => move.toLabel === core.label && move.fromLabel !== fromLabel,
+            ),
+        )
+        .map((core, position) => ({
+          core,
+          scope: group.scope,
+          splitter: group.label,
+          position,
+        })),
+    );
+  }
+
+  function splitterNameForLeg(label: string): string | null {
+    return (
+      outputCoreGroups().find((group) => group.cores.some((core) => core.label === label))?.label ??
+      null
+    );
+  }
+
+  function pendingCoreMoves(scope: number, fromLabel: string) {
+    return coreMoves.filter((move) => move.scope === scope && move.fromLabel === fromLabel);
+  }
+
+  function queueCoreMove() {
+    if (!coreChange || !coreChange.toLabel) return;
+    const move = { ...coreChange };
+    setCoreMoves((moves) => [
+      ...moves.filter(
+        (item) => item.fromLabel !== move.fromLabel && item.toLabel !== move.toLabel,
+      ),
+      move,
+    ]);
+    setCoreChange(null);
+    toast.info(
+      `Will move ${displayCoreLabel(move.fromLabel)} → ${splitterNameForLeg(move.toLabel) ?? ''} ${displayCoreLabel(move.toLabel)} on save.`,
+    );
   }
 
   async function handleSubmit(event: React.FormEvent) {
@@ -1607,6 +1721,36 @@ export function TjFormDialog({
     setError(null);
     try {
       const saved = initial ? await api.updateTj(initial.id, payload) : await api.createTj(payload);
+      // Legs regenerated by a ratio change drop any queued move that no longer
+      // names a live core.
+      const liveCoreLabels = new Set([
+        ...form.outputCores.map((core) => core.label),
+        ...form.extraSplitters.flatMap((splitter) =>
+          splitter.outputs.map((core) => core.label),
+        ),
+      ]);
+      const movesToApply = coreMoves.filter(
+        (move) => liveCoreLabels.has(move.fromLabel) && liveCoreLabels.has(move.toLabel),
+      );
+      if (initial && movesToApply.length > 0) {
+        // The joint is saved first, then each leg's cables are re-patched onto
+        // its new core by the dedicated move endpoint.
+        const appliedMoves: typeof movesToApply = [];
+        try {
+          for (const move of movesToApply) {
+            await api.changeTjOutputCore(initial.id, {
+              fromLabel: move.fromLabel,
+              toLabel: move.toLabel,
+            });
+            appliedMoves.push(move);
+          }
+        } catch (moveError) {
+          setCoreMoves((moves) => moves.filter((move) => !appliedMoves.includes(move)));
+          throw moveError;
+        }
+        setCoreMoves([]);
+        await onLinksChanged?.();
+      }
       toast.success(initial ? `${saved.code} updated` : `${saved.code} added to the map`, {
         description:
           form.tjType === 'cut'
@@ -2184,6 +2328,25 @@ export function TjFormDialog({
                       </div>
 
                       <div className="flex items-center gap-2 shrink-0">
+                        {initial &&
+                        (core.status !== 'free' ||
+                          attachedFibres.length > 0 ||
+                          Boolean(core.connectedLinkId)) ? (
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            onClick={() =>
+                              setCoreChange({ scope: 0, fromLabel: core.label, toLabel: '' })
+                            }
+                            className="h-7 gap-1 px-2 text-[10.5px]"
+                            title="Move this leg's cables onto a free core of the same splitter"
+                          >
+                            <ArrowRightLeft className="size-3" />
+                            Change core
+                          </Button>
+                        ) : null}
+
                         {/* Status Toggle Button */}
                         <button
                           type="button"
@@ -2232,6 +2395,16 @@ export function TjFormDialog({
                         </button>
                       </div>
                     </div>
+
+                    {pendingCoreMoves(0, core.label).map((move) => (
+                      <p
+                        key={`${move.fromLabel}-${move.toLabel}`}
+                        className="rounded-lg border border-amber-500/35 bg-amber-500/10 px-2 py-1 text-[10px] font-medium text-amber-700 dark:text-amber-300"
+                      >
+                        Moves to {splitterNameForLeg(move.toLabel) ?? ''}{' '}
+                        {displayCoreLabel(move.toLabel)} when you save.
+                      </p>
+                    ))}
 
                     {/* ATTACHED USER FIBRES */}
                     {attachedFibres.length > 0 ? (
@@ -2846,6 +3019,29 @@ export function TjFormDialog({
                               </div>
 
                               <div className="flex items-center gap-2 shrink-0">
+                                {initial &&
+                                (out.status !== 'free' ||
+                                  attachedFibres.length > 0 ||
+                                  Boolean(out.connectedLinkId)) ? (
+                                  <Button
+                                    type="button"
+                                    variant="outline"
+                                    size="sm"
+                                    onClick={() =>
+                                      setCoreChange({
+                                        scope: index + 1,
+                                        fromLabel: out.label,
+                                        toLabel: '',
+                                      })
+                                    }
+                                    className="h-7 gap-1 px-2 text-[10.5px]"
+                                    title="Move this leg's cables onto a free core of the same splitter"
+                                  >
+                                    <ArrowRightLeft className="size-3" />
+                                    Change core
+                                  </Button>
+                                ) : null}
+
                                 {/* Status Toggle Button */}
                                 <button
                                   type="button"
@@ -2895,6 +3091,16 @@ export function TjFormDialog({
                               </div>
                             </div>
 
+                            {pendingCoreMoves(index + 1, out.label).map((move) => (
+                              <p
+                                key={`${move.fromLabel}-${move.toLabel}`}
+                                className="rounded-lg border border-amber-500/35 bg-amber-500/10 px-2 py-1 text-[10px] font-medium text-amber-700 dark:text-amber-300"
+                              >
+                                Moves to {splitterNameForLeg(move.toLabel) ?? ''}{' '}
+                        {displayCoreLabel(move.toLabel)} when you save.
+                              </p>
+                            ))}
+
                             {/* ATTACHED USER FIBRES */}
                             <AttachedUserFibres
                               fibres={attachedFibres}
@@ -2917,14 +3123,6 @@ export function TjFormDialog({
             })}
           </section>
 
-            {initial ? (
-              <FibreCorePicker
-                kind="tj"
-                deviceId={initial.id}
-                links={links}
-                onPatched={onLinksChanged}
-              />
-            ) : null}
             </>
           ) : null}
 
@@ -3224,6 +3422,109 @@ export function TjFormDialog({
           </DialogFooter>
         </form>
       </DialogContent>
+
+      <Dialog
+        open={Boolean(coreChange && changeSource)}
+        onOpenChange={(next) => {
+          if (!next) setCoreChange(null);
+        }}
+      >
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle>Change output core</DialogTitle>
+            <DialogDescription>
+              {coreChange
+                ? `${splitterLabelForScope(coreChange.scope)} · move its cable links and user drop cables onto any free leg in this joint.`
+                : ''}
+            </DialogDescription>
+          </DialogHeader>
+          {coreChange && changeSource ? (
+            <DialogBody className="space-y-3">
+              <div className="flex items-center gap-2 rounded-xl border border-rose-500/30 bg-rose-500/[0.06] px-2.5 py-2 text-[11.5px]">
+                <span
+                  className="size-2.5 shrink-0 rounded-full"
+                  style={{ backgroundColor: changeSource.color }}
+                />
+                <span className="min-w-0 flex-1 truncate font-semibold">
+                  {displayCoreLabel(changeSource.label)}
+                </span>
+                <span className="shrink-0 rounded-md bg-muted px-1.5 py-0.5 text-[9.5px] font-semibold text-muted-foreground">
+                  {changeSource.status === 'damaged' ? 'Cut' : 'In use'}
+                </span>
+                <span className="shrink-0 text-[9.5px] uppercase tracking-wide text-muted-foreground">
+                  current
+                </span>
+              </div>
+
+              {coreMoveTargets(coreChange.fromLabel).length === 0 ? (
+                <p className="rounded-xl border border-dashed border-border px-3 py-3 text-center text-[11px] text-muted-foreground">
+                  This joint has no free output core to move onto.
+                </p>
+              ) : (
+                <div className="space-y-2">
+                  <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
+                    Move onto
+                  </p>
+                  {outputCoreGroups().map((group) => {
+                    const targets = coreMoveTargets(coreChange.fromLabel).filter(
+                      (target) => target.scope === group.scope,
+                    );
+                    if (targets.length === 0) return null;
+                    return (
+                      <div key={group.scope} className="space-y-1">
+                        <p className="text-[9.5px] font-semibold uppercase tracking-[0.1em] text-muted-foreground/80">
+                          {group.label}
+                        </p>
+                        {targets.map(({ core, position }) => (
+                          <button
+                            key={core.label}
+                            type="button"
+                            onClick={() =>
+                              setCoreChange((current) =>
+                                current ? { ...current, toLabel: core.label } : current,
+                              )
+                            }
+                            className={cn(
+                              'flex w-full items-center gap-2 rounded-xl border px-2.5 py-1.5 text-left text-[11px] transition',
+                              coreChange.toLabel === core.label
+                                ? 'border-primary/50 bg-primary/10'
+                                : 'border-border/60 hover:border-primary/40',
+                            )}
+                          >
+                            <span
+                              className="size-2.5 shrink-0 rounded-full"
+                              style={{ backgroundColor: core.color }}
+                            />
+                            <span className="min-w-0 flex-1 truncate font-medium">
+                              {displayCoreLabel(core.label, position + 1)}
+                            </span>
+                            <span className="shrink-0 rounded-md bg-emerald-500/15 px-1.5 py-0.5 text-[9.5px] font-semibold text-emerald-700 dark:text-emerald-300">
+                              Free
+                            </span>
+                          </button>
+                        ))}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              <p className="text-[10px] leading-relaxed text-muted-foreground">
+                Applied when you save. The old core is left as{' '}
+                {changeSource.status === 'damaged' ? 'Cut' : 'Free'}.
+              </p>
+            </DialogBody>
+          ) : null}
+          <DialogFooter>
+            <Button type="button" variant="ghost" size="sm" onClick={() => setCoreChange(null)}>
+              Cancel
+            </Button>
+            <Button type="button" size="sm" disabled={!coreChange?.toLabel} onClick={queueCoreMove}>
+              Move cables
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <SubAreaDialog
         open={subAreaFormOpen}

@@ -293,7 +293,6 @@ export function Sidebar({
             onu.vlanId != null ? `vlan ${onu.vlanId}` : null,
             onu.notes,
             onu.subAreaName,
-            ...onu.cores.map((core) => core.label),
           ]),
         )
         .sort((a, b) => a.username.localeCompare(b.username)),
@@ -470,6 +469,7 @@ export function Sidebar({
         {list.map((olt) => {
           const active = olt.id === selectedOltId;
           const ponUsed = olt.ponPorts.filter((port) => port.status === 'in_use').length;
+          const ponFull = olt.ponPorts.filter((port) => port.full).length;
           return (
             <Fragment key={olt.id}>
             <button
@@ -498,6 +498,11 @@ export function Sidebar({
                   <span>
                     {ponUsed}/{olt.ponPorts.length} PON
                   </span>
+                  {ponFull > 0 ? (
+                    <span className="rounded bg-destructive/10 px-1.5 font-semibold text-destructive">
+                      {ponFull} full
+                    </span>
+                  ) : null}
                   {olt.subAreaName ? (
                     <span className="truncate text-primary/80">{olt.subAreaName}</span>
                   ) : null}
@@ -528,8 +533,8 @@ export function Sidebar({
         <SectionHeader icon={User} label="ONUs" shown={list.length} total={total} />
         {list.map((onu) => {
           const active = onu.id === selectedOnuId;
-          const used = onu.cores.filter((core) => core.status === 'in_use').length;
-          const free = Math.max(0, onu.cores.length - used);
+          const port = (onu.cores ?? [])[0];
+          const portUsed = port !== undefined && (port.status ?? 'free') !== 'free';
           return (
             <Fragment key={onu.id}>
             <button
@@ -567,7 +572,7 @@ export function Sidebar({
                     </span>
                   ) : null}
                   <span className="ml-auto shrink-0">
-                    {used}/{onu.cores.length} used · {free} free
+                    {portUsed ? 'Port in use' : 'Port free'}
                   </span>
                 </div>
               </div>

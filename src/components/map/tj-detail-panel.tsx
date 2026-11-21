@@ -43,6 +43,7 @@ import { assessOpticalPower, calculateOutputPower, getSplitterLossDb } from '@/l
 import { findUpstreamPower, getTjInputCoreLabel } from '@/lib/core-power';
 import { splitterFeedLabels, splitterFeedName, tjCoreUnavailable } from '@/lib/device-ports';
 import { displayCoreLabel } from '@/lib/fibre-cores';
+import { api } from '@/lib/api';
 
 interface TjDetailPanelProps {
   tj: Tj | null;

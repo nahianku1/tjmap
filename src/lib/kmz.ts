@@ -269,11 +269,8 @@ function toOnu(device: KmzDevice, index: number): Onu {
     fibreId: `KMZ-ONU-${index + 1}`,
     ponType: 'gpon',
     onuClass: 'B+',
-    cores: deviceCores().map((core) => ({
-      label: core.label,
-      color: core.color,
-      status: core.status,
-    })),
+    // One PON input port, like a real ONU: no colour and no core name.
+    cores: [{ label: 'PON', status: 'free' }],
     notes: device.notes,
     lat: device.lat,
     lng: device.lng,

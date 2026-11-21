@@ -171,6 +171,12 @@ export interface PonPort {
   /** Server-derived: in use while a joint is served through this port. */
   status?: PortStatus;
   joints?: number;
+  /** Server-derived: ONUs provisioned downstream of this port. */
+  onus?: number;
+  /** ONUs this port can serve, from the OLT technology (GPON 128, EPON 64). */
+  capacity?: number;
+  /** Server-derived: the port has no free ONU slot left. */
+  full?: boolean;
 }
 
 export interface EthernetPort {
@@ -186,6 +192,7 @@ export interface Olt {
   id: string;
   code: string;
   name: string;
+  oltType?: string;
   ponPort: string | null;
   uplinkPort: string | null;
   ponPorts: PonPort[];
@@ -209,6 +216,7 @@ export interface Olt {
 export interface OltInput {
   name: string;
   code?: string;
+  oltType?: string;
   ponPort?: string;
   uplinkPort?: string;
   ponPorts?: PonPort[];
@@ -343,10 +351,10 @@ export interface FibreLink {
 }
 
 export interface OnuCore {
+  /** Internal key of the single PON input port; never shown as a port name. */
   label: string;
-  color: string;
   status: CoreStatus;
-  /** Set when a fibre link uses this core, so the link can free it later. */
+  /** Set when a fibre link uses this port, so the link can free it later. */
   connectedLinkId?: string | null;
 }
 
@@ -379,7 +387,6 @@ export interface OnuInput {
   fibreId?: string | null;
   ponType?: PonType;
   onuClass?: OnuClass;
-  cores: OnuCore[];
   areaId?: string | null;
   subAreaId?: string | null;
   lat?: number;

@@ -10,7 +10,6 @@ import {
   Layers,
   Link2,
   MapPin,
-  Network,
   Pencil,
   Split,
   Trash2,
@@ -30,10 +29,14 @@ import {
 } from '@/components/ui/sheet';
 import { Separator } from '@/components/ui/separator';
 import { Button } from '@/components/ui/button';
-import { CorePatchLine, linkPatches, type CorePatch } from '@/components/map/core-patch-line';
-import type { CoreStatus, FibreLink, Olt, Onu, Tj } from '@/lib/types';
-import { computeOnuPowerBudget, type BudgetStatus } from '@/lib/power-budget';
-import { displayCoreLabel } from '@/lib/fibre-cores';
+import type { FibreLink, Olt, Onu, Tj } from '@/lib/types';
+import {
+  computeOnuPowerBudget,
+  diagnoseOnuChain,
+  type BudgetStatus,
+  type OnuChainDiagnosis,
+  type OnuChainStatus,
+} from '@/lib/power-budget';
 import { cn, formatDistance } from '@/lib/utils';
 
 interface OnuDetailPanelProps {
@@ -49,20 +52,6 @@ interface OnuDetailPanelProps {
   onDelete: (onu: Onu) => void;
 }
 
-const STATUS_STYLES: Record<CoreStatus, string> = {
-  free: 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300',
-  in_use: 'bg-sky-500/15 text-sky-700 dark:text-sky-300',
-  spliced: 'bg-teal-500/15 text-teal-700 dark:text-teal-300',
-  damaged: 'bg-rose-500/15 text-rose-700 dark:text-rose-300',
-};
-
-const STATUS_LABELS: Record<CoreStatus, string> = {
-  free: 'Free',
-  in_use: 'In use',
-  spliced: 'Spliced',
-  damaged: 'Cut',
-};
-
 export function OnuDetailPanel({
   onu,
   tjs,
@@ -75,20 +64,100 @@ export function OnuDetailPanel({
   onSelectLink,
   onDelete,
 }: OnuDetailPanelProps) {
+  /** Fibre spans attached to this ONU; a real ONU has one input port, so one span. */
   const spans = useMemo(
     () =>
       onu ? links.filter((link) => link.fromOnuId === onu.id || link.toOnuId === onu.id) : [],
-    [links, onu],
-  );
-  /** Per-core far-end mapping from the area's fibre links. */
-  const patches = useMemo<Map<string, CorePatch>>(
-    () => (onu ? linkPatches(links, { kind: 'onu', id: onu.id }) : new Map()),
     [links, onu],
   );
   const budget = useMemo(
     () => (onu ? computeOnuPowerBudget(onu, tjs, olts, links) : null),
     [onu, tjs, olts, links],
   );
+  // Chain health is read from the physical route, so it still reports the break
+  // when no power budget can be calculated.
+  const chain = useMemo(
+    () => (onu ? diagnoseOnuChain(onu, tjs, olts, links) : null),
+    [onu, tjs, olts, links],
+  );
+  const onuLeds = useMemo<{
+    power: OnuLedState;
+    pon: OnuLedState;
+    loss: OnuLedState;
+    lan: OnuLedState;
+  }>(() => {
+    const hasDrop = spans.length > 0;
+    const dropUp = spans.some((span) => span.status === 'active');
+    const lost =
+      hasDrop &&
+      (!budget ||
+        budget.hasCut ||
+        budget.coreFaults.length > 0 ||
+        budget.status === 'over');
+    const degraded =
+      Boolean(budget) &&
+      !lost &&
+      (budget!.status === 'marginal' || budget!.status === 'overload');
+    return {
+      // The unit is powered once its drop cable is patched; the PON light stays
+      // off until the chain actually hands it light.
+      power: hasDrop ? 'solid' : 'off',
+      pon: !hasDrop || lost ? 'off' : degraded ? 'blink' : 'solid',
+      loss: lost ? 'alert' : 'off',
+      lan: hasDrop && dropUp ? 'blink' : 'off',
+    };
+  }, [spans, budget]);
+
+  const onuChain = useMemo(() => {
+    if (spans.length === 0) {
+      return {
+        label: 'No drop cable',
+        tone: 'border-slate-600/60 bg-slate-500/10 text-slate-300',
+        detail: 'Patch a drop cable into the PON port to bring this ONU online.',
+      };
+    }
+    if (!budget) {
+      return {
+        label: 'No signal',
+        tone: 'border-rose-500/40 bg-rose-500/10 text-rose-300',
+        detail:
+          'No powered path back to the OLT. Check the splitter feed core and the upstream links.',
+      };
+    }
+    if (budget.hasCut || budget.coreFaults.length > 0) {
+      return {
+        label: 'Signal lost',
+        tone: 'border-rose-500/40 bg-rose-500/10 text-rose-300',
+        detail: budget.coreFaults[0] ?? 'The route crosses a cut fibre link.',
+      };
+    }
+    if (budget.status === 'over') {
+      return {
+        label: 'Signal too low',
+        tone: 'border-rose-500/40 bg-rose-500/10 text-rose-300',
+        detail: `${budget.rxPowerDbm.toFixed(2)} dBm is below the ONU sensitivity floor.`,
+      };
+    }
+    if (budget.status === 'overload') {
+      return {
+        label: 'Signal too strong',
+        tone: 'border-amber-500/40 bg-amber-500/10 text-amber-300',
+        detail: `${budget.rxPowerDbm.toFixed(2)} dBm is above the ONU overload point.`,
+      };
+    }
+    if (budget.status === 'marginal') {
+      return {
+        label: 'Marginal signal',
+        tone: 'border-amber-500/40 bg-amber-500/10 text-amber-300',
+        detail: `${budget.rxPowerDbm.toFixed(2)} dBm · only ${budget.marginDb.toFixed(2)} dB of ODN margin left.`,
+      };
+    }
+    return {
+      label: 'Registered',
+      tone: 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300',
+      detail: `${budget.oltCode} · ${budget.ponPort ?? 'PON'} · RX ${budget.rxPowerDbm.toFixed(2)} dBm`,
+    };
+  }, [spans.length, budget]);
   const [copied, setCopied] = useState(false);
 
   async function copyCoordinates() {
@@ -130,6 +199,36 @@ export function OnuDetailPanel({
             </SheetHeader>
 
             <SheetBody className="space-y-3">
+              {/* LIVE ONU FRONT PANEL */}
+              <section className="rounded-2xl border border-slate-700/60 bg-[#0b1220] p-3 shadow-inner">
+                <div className="mb-2 flex items-center justify-between gap-2">
+                  <p className="inline-flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-400">
+                    <span className="relative flex size-2">
+                      <span className="absolute inline-flex size-full animate-ping rounded-full bg-emerald-400 opacity-60" />
+                      <span className="relative inline-flex size-2 rounded-full bg-emerald-500" />
+                    </span>
+                    ONU indicators · live
+                  </p>
+                  <span
+                    className={cn(
+                      'rounded-md border px-2 py-0.5 text-[9.5px] font-semibold',
+                      onuChain.tone,
+                    )}
+                  >
+                    {onuChain.label}
+                  </span>
+                </div>
+                <OnuStatusGraphic
+                  power={onuLeds.power}
+                  pon={onuLeds.pon}
+                  loss={onuLeds.loss}
+                  lan={onuLeds.lan}
+                />
+                <p className="mt-2 font-mono text-[9.5px] leading-relaxed text-slate-400">
+                  {onuChain.detail}
+                </p>
+              </section>
+
               <div className="grid grid-cols-2 gap-2">
                 <div className="rounded-2xl border border-white/55 bg-white/45 p-3 dark:border-white/[0.06] dark:bg-white/[0.02]">
                   <p className="text-[8.5px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
@@ -154,13 +253,31 @@ export function OnuDetailPanel({
                     <Gauge className="size-3 text-violet-500" />
                     Power budget · OLT → ONU
                   </p>
-                  {budget ? <BudgetStatusBadge status={budget.status} /> : null}
+                  <div className="flex flex-wrap items-center justify-end gap-1.5">
+                    {chain ? <ChainStatusBadge status={chain.status} /> : null}
+                    {budget ? <BudgetStatusBadge status={budget.status} /> : null}
+                  </div>
                 </div>
 
                 {!budget ? (
-                  <p className="mt-2 rounded-xl border border-dashed border-border px-3 py-3 text-[11px] text-muted-foreground">
-                    Link this ONU through its TJ chain to an OLT to calculate the power budget.
-                  </p>
+                  <div className="mt-2 space-y-2">
+                    {chain ? (
+                      <p
+                        className={cn(
+                          'rounded-xl border px-2.5 py-2 text-[10.5px] leading-relaxed',
+                          chain.status === 'cut' || chain.status === 'open'
+                            ? 'border-rose-500/30 bg-rose-500/[0.06] text-rose-700 dark:text-rose-300'
+                            : 'border-amber-500/30 bg-amber-500/[0.06] text-amber-700 dark:text-amber-300',
+                        )}
+                      >
+                        {chain.detail}
+                      </p>
+                    ) : null}
+                    {chain ? <ChainStatusList chain={chain} /> : null}
+                    <p className="text-[10px] text-muted-foreground">
+                      Optical power is not available until the chain above is intact and fed.
+                    </p>
+                  </div>
                 ) : (
                   <div className="mt-2 space-y-2.5">
                     <div className="flex flex-wrap items-center gap-1 font-mono text-[10px]">
@@ -242,13 +359,38 @@ export function OnuDetailPanel({
                       {budget.spans.map((span) => (
                         <div
                           key={span.linkId}
-                          className="rounded-lg border border-white/60 bg-white/55 px-2 py-1.5 dark:border-white/10 dark:bg-white/[0.03]"
+                          className={cn(
+                            'rounded-lg border px-2 py-1.5',
+                            span.status === 'active'
+                              ? 'border-white/60 bg-white/55 dark:border-white/10 dark:bg-white/[0.03]'
+                              : 'border-rose-500/30 bg-rose-500/[0.06]',
+                          )}
                         >
                           <div className="flex items-center justify-between gap-2 font-mono text-[10px]">
-                            <span className="truncate">
-                              {span.fromCode} → {span.toCode}
+                            <span className="inline-flex min-w-0 items-center gap-1.5">
+                              <span
+                                className={cn(
+                                  'size-1.5 shrink-0 rounded-full',
+                                  span.status === 'active' ? 'bg-emerald-500' : 'bg-rose-500',
+                                )}
+                              />
+                              <span className="truncate">
+                                {span.fromCode} → {span.toCode}
+                              </span>
                             </span>
-                            <span className="shrink-0 font-semibold">{span.totalLossDb.toFixed(2)} dB</span>
+                            <span className="flex shrink-0 items-center gap-1.5">
+                              <span
+                                className={cn(
+                                  'rounded px-1 py-0.5 text-[8.5px] font-semibold uppercase',
+                                  span.status === 'active'
+                                    ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300'
+                                    : 'bg-rose-500/15 text-rose-700 dark:text-rose-300',
+                                )}
+                              >
+                                {span.status === 'active' ? 'Active' : 'Cut'}
+                              </span>
+                              <span className="font-semibold">{span.totalLossDb.toFixed(2)} dB</span>
+                            </span>
                           </div>
                           <p className="mt-0.5 text-[9px] text-muted-foreground">
                             {span.fibreId}
@@ -271,6 +413,16 @@ export function OnuDetailPanel({
                               <span className="min-w-0 flex-1 truncate font-mono">
                                 {splitter.tjCode} · splitter {splitter.ratio}
                               </span>
+                              <span
+                                className={cn(
+                                  'shrink-0 rounded px-1 py-0.5 text-[8.5px] font-semibold uppercase',
+                                  splitter.fed
+                                    ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300'
+                                    : 'bg-rose-500/15 text-rose-700 dark:text-rose-300',
+                                )}
+                              >
+                                {splitter.fed ? 'Fed' : 'No feed'}
+                              </span>
                               <span className="shrink-0 font-mono font-semibold text-rose-500">
                                 −{splitter.lossDb.toFixed(2)} dB
                               </span>
@@ -292,6 +444,15 @@ export function OnuDetailPanel({
                         Route crosses a cut fibre link; calculated power is for the intact path.
                       </p>
                     ) : null}
+                    {budget.coreFaults.map((fault) => (
+                      <p
+                        key={fault}
+                        className="flex items-start gap-1.5 rounded-lg border border-rose-500/30 bg-rose-500/[0.08] px-2 py-1.5 text-[10px] text-rose-700 dark:text-rose-300"
+                      >
+                        <TriangleAlert className="mt-0.5 size-3 shrink-0" />
+                        {fault}
+                      </p>
+                    ))}
                   </div>
                 )}
               </section>
@@ -299,55 +460,38 @@ export function OnuDetailPanel({
               <div className="rounded-2xl border border-white/55 bg-white/45 p-3 dark:border-white/[0.06] dark:bg-white/[0.02]">
                 <div className="flex items-center justify-between gap-2">
                   <p className="inline-flex items-center gap-1.5 text-[8.5px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
-                    <Network className="size-3" />
-                    Fibre cores
+                    <Cable className="size-3" />
+                    PON input port
                   </p>
-                  <span className="font-mono text-[10px] text-muted-foreground">
-                    {onu.cores.filter((core) => core.status === 'free').length} free ·{' '}
-                    {onu.cores.length}
+                  <span
+                    className={`shrink-0 rounded px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide ${
+                      spans.length > 0
+                        ? 'bg-sky-500/15 text-sky-700 dark:text-sky-300'
+                        : 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300'
+                    }`}
+                  >
+                    {spans.length > 0 ? 'Connected' : 'Free'}
                   </span>
                 </div>
-                {onu.cores.length > 0 ? (
+                {spans.length > 0 ? (
                   <ul className="mt-1.5 space-y-1">
-                    {onu.cores.map((core, index) => {
-                      const status = (core.status ?? 'free') as CoreStatus;
-                      const patch = patches.get(core.label);
-                      return (
-                        <li
-                          key={`${core.label}-${index}`}
-                          className="font-mono text-[11.5px]"
-                        >
-                          <div className="flex items-center justify-between gap-2">
-                            <span className="flex min-w-0 items-center gap-1.5">
-                              <span
-                                className="size-2.5 shrink-0 rounded-full"
-                                style={{ backgroundColor: core.color }}
-                              />
-                              <span className="truncate font-semibold">
-                                {displayCoreLabel(core.label, index + 1)}
-                              </span>
-                            </span>
-                            <span
-                              className={`shrink-0 rounded px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide ${
-                                STATUS_STYLES[status] ?? STATUS_STYLES.free
-                              }`}
-                            >
-                              {STATUS_LABELS[status] ?? 'Free'}
-                            </span>
-                          </div>
-                          {patch ? (
-                            <CorePatchLine
-                              localCode={onu.fibreId ?? onu.username}
-                              localCore={core.label}
-                              patch={patch}
-                            />
-                          ) : null}
-                        </li>
-                      );
-                    })}
+                    {spans.map((span) => (
+                      <li
+                        key={span.id}
+                        className="flex items-center gap-1 font-mono text-[11px]"
+                      >
+                        <ArrowRight className="size-2.5 shrink-0 text-muted-foreground" />
+                        <span className="truncate font-semibold">
+                          {span.fromOnuId === onu.id ? span.toCode : span.fromCode}
+                        </span>
+                        <span className="truncate text-muted-foreground">· {span.fibreId}</span>
+                      </li>
+                    ))}
                   </ul>
                 ) : (
-                  <p className="mt-1 text-[11px] text-muted-foreground">No cores recorded.</p>
+                  <p className="mt-1 text-[11px] text-muted-foreground">
+                    One drop-cable input — connect it to a fibre link.
+                  </p>
                 )}
               </div>
 
@@ -501,6 +645,294 @@ export function OnuDetailPanel({
         ) : null}
       </SheetContent>
     </Sheet>
+  );
+}
+
+type OnuLedState = 'off' | 'solid' | 'blink' | 'alert';
+
+/** A small front-panel illustration; the LEDs animate from the live chain state. */
+function OnuStatusGraphic({
+  power,
+  pon,
+  loss,
+  lan,
+}: {
+  power: OnuLedState;
+  pon: OnuLedState;
+  loss: OnuLedState;
+  lan: OnuLedState;
+}) {
+  const leds: { cx: number; label: string; state: OnuLedState; color: string }[] = [
+    { cx: 68, label: 'PWR', state: power, color: '#22c55e' },
+    { cx: 128, label: 'PON', state: pon, color: '#22c55e' },
+    { cx: 188, label: 'LOSS', state: loss, color: '#ef4444' },
+    { cx: 248, label: 'LAN', state: lan, color: '#22c55e' },
+  ];
+
+  return (
+    <svg
+      viewBox="0 0 316 140"
+      role="img"
+      aria-label="ONU front panel with PWR, PON, LOSS and LAN indicator lights"
+      className="block w-full"
+    >
+      <defs>
+        <linearGradient id="onu-body" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor="#3d485c" />
+          <stop offset="55%" stopColor="#222b3a" />
+          <stop offset="100%" stopColor="#151c27" />
+        </linearGradient>
+        <linearGradient id="onu-face" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor="#151d29" />
+          <stop offset="100%" stopColor="#0a1018" />
+        </linearGradient>
+        <filter id="onu-glow" x="-120%" y="-120%" width="340%" height="340%">
+          <feGaussianBlur stdDeviation="4" />
+        </filter>
+      </defs>
+
+      {/* device body */}
+      <rect
+        x="10"
+        y="6"
+        width="296"
+        height="126"
+        rx="16"
+        fill="url(#onu-body)"
+        stroke="#4a5870"
+        strokeWidth="1"
+      />
+      <rect x="16" y="8" width="284" height="15" rx="8" fill="#ffffff" opacity="0.05" />
+      <rect
+        x="16"
+        y="30"
+        width="284"
+        height="94"
+        rx="10"
+        fill="url(#onu-face)"
+        stroke="#2b3546"
+      />
+
+      {/* brand and ventilation */}
+      <text
+        x="26"
+        y="22"
+        fill="#8494ab"
+        fontSize="7"
+        letterSpacing="1.8"
+        fontFamily="ui-monospace, monospace"
+      >
+        GPON ONU
+      </text>
+      {[0, 1, 2, 3].map((row) =>
+        [0, 1].map((col) => (
+          <circle
+            key={`vent-${row}-${col}`}
+            cx={285 + col * 5}
+            cy={17 + row * 4}
+            r="1"
+            fill="#3f4c60"
+          />
+        )),
+      )}
+
+      {/* indicator LEDs */}
+      {leds.map((led) => {
+        const active = led.state !== 'off';
+        return (
+          <g key={led.label}>
+            {active ? (
+              <>
+                <circle
+                  cx={led.cx}
+                  cy={48}
+                  r={12}
+                  fill={led.color}
+                  opacity={0.18}
+                  filter="url(#onu-glow)"
+                />
+                <circle cx={led.cx} cy={48} r={7} fill={led.color} opacity={0.3} />
+              </>
+            ) : null}
+            <circle cx={led.cx} cy={48} r={4.4} fill={active ? led.color : '#3a4658'}>
+              {led.state === 'blink' ? (
+                <animate
+                  attributeName="opacity"
+                  values="1;0.12;1"
+                  dur="1.6s"
+                  repeatCount="indefinite"
+                />
+              ) : null}
+              {led.state === 'alert' ? (
+                <animate
+                  attributeName="opacity"
+                  values="1;1;0.2;1"
+                  keyTimes="0;0.68;0.78;1"
+                  dur="1.4s"
+                  repeatCount="indefinite"
+                />
+              ) : null}
+            </circle>
+            <text
+              x={led.cx}
+              y={69}
+              textAnchor="middle"
+              fill="#8b9bb1"
+              fontSize="6.8"
+              letterSpacing="1.1"
+              fontFamily="ui-monospace, monospace"
+            >
+              {led.label}
+            </text>
+          </g>
+        );
+      })}
+
+      {/* PON, LAN and power ports */}
+      <g fill="#070c13" stroke="#334155" strokeWidth="0.8">
+        <rect x="32" y="90" width="42" height="17" rx="2.5" />
+        <rect x="86" y="90" width="34" height="17" rx="2.5" />
+        <rect x="128" y="90" width="34" height="17" rx="2.5" />
+        <rect x="170" y="90" width="34" height="17" rx="2.5" />
+        <rect x="212" y="90" width="34" height="17" rx="2.5" />
+        <rect x="262" y="90" width="18" height="17" rx="3.5" />
+      </g>
+      <g
+        fill="#64748b"
+        fontSize="5.4"
+        textAnchor="middle"
+        fontFamily="ui-monospace, monospace"
+        letterSpacing="0.4"
+      >
+        <text x="53" y="101">PON</text>
+        <text x="103" y="101">LAN1</text>
+        <text x="145" y="101">LAN2</text>
+        <text x="187" y="101">LAN3</text>
+        <text x="229" y="101">LAN4</text>
+        <text x="271" y="101">DC</text>
+      </g>
+      {/* fibre port dust cap */}
+      <rect x="36" y="93" width="7" height="11" rx="1.5" fill="#1f7a4d" opacity="0.7" />
+    </svg>
+  );
+}
+
+const CHAIN_TONES: Record<OnuChainStatus, string> = {
+  ok: 'border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300',
+  cut: 'border-rose-500/40 bg-rose-500/10 text-rose-700 dark:text-rose-300',
+  unfed: 'border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-300',
+  open: 'border-slate-500/40 bg-slate-500/10 text-slate-600 dark:text-slate-300',
+};
+
+const CHAIN_LABELS: Record<OnuChainStatus, string> = {
+  ok: 'Chain OK',
+  cut: 'Cut detected',
+  unfed: 'Splitter unfed',
+  open: 'No path',
+};
+
+function ChainStatusBadge({ status }: { status: OnuChainStatus }) {
+  return (
+    <span
+      className={cn(
+        'rounded-md border px-2 py-0.5 text-[9.5px] font-semibold',
+        CHAIN_TONES[status],
+      )}
+    >
+      {CHAIN_LABELS[status]}
+    </span>
+  );
+}
+
+/** Live span-by-span state of the OLT → ONU chain, shown when no budget exists. */
+function ChainStatusList({ chain }: { chain: OnuChainDiagnosis }) {
+  return (
+    <div className="space-y-1">
+      <p className="text-[9px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
+        Link chain · live
+      </p>
+      {chain.spans.length === 0 ? (
+        <p className="rounded-lg border border-dashed border-border px-2 py-2 text-[10px] text-muted-foreground">
+          No fibre span is connected to this ONU.
+        </p>
+      ) : null}
+      {chain.spans.map((span) => (
+        <div
+          key={span.linkId}
+          className={cn(
+            'rounded-lg border px-2 py-1.5',
+            span.status === 'active'
+              ? 'border-emerald-500/25 bg-emerald-500/[0.04]'
+              : 'border-rose-500/30 bg-rose-500/[0.06]',
+          )}
+        >
+          <div className="flex items-center gap-2 font-mono text-[10px]">
+            <span
+              className={cn(
+                'size-1.5 shrink-0 rounded-full',
+                span.status === 'active' ? 'bg-emerald-500' : 'bg-rose-500',
+              )}
+            />
+            <span className="truncate">
+              {span.fromCode} → {span.toCode}
+            </span>
+            <span
+              className={cn(
+                'ml-auto shrink-0 rounded px-1 py-0.5 text-[8.5px] font-semibold uppercase',
+                span.status === 'active'
+                  ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300'
+                  : 'bg-rose-500/15 text-rose-700 dark:text-rose-300',
+              )}
+            >
+              {span.status === 'active' ? 'Active' : 'Cut'}
+            </span>
+          </div>
+          <p className="mt-0.5 text-[9px] text-muted-foreground">
+            {span.fibreId}
+            {span.lengthM !== null ? ` · ${formatDistance(span.lengthM)}` : ''}
+            {span.coreLabel ? ` · ${span.coreLabel}` : ''}
+          </p>
+        </div>
+      ))}
+      {chain.splitters.map((splitter) => (
+        <div
+          key={splitter.tjId}
+          className={cn(
+            'flex items-center gap-1.5 rounded-lg border px-2 py-1 text-[10px]',
+            splitter.fed
+              ? 'border-violet-500/25 bg-violet-500/[0.05]'
+              : 'border-rose-500/30 bg-rose-500/[0.06]',
+          )}
+        >
+          <Split className="size-3 shrink-0 text-violet-500" />
+          <span className="min-w-0 flex-1 truncate font-mono">
+            {splitter.tjCode} · splitter {splitter.ratio}
+          </span>
+          <span
+            className={cn(
+              'shrink-0 rounded px-1 py-0.5 text-[8.5px] font-semibold uppercase',
+              splitter.fed
+                ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300'
+                : 'bg-rose-500/15 text-rose-700 dark:text-rose-300',
+            )}
+          >
+            {splitter.fed ? 'Fed' : 'No feed'}
+          </span>
+        </div>
+      ))}
+      {chain.faults.length > 0 ? (
+        <ul className="space-y-1 pt-0.5">
+          {chain.faults.map((fault) => (
+            <li
+              key={fault}
+              className="rounded-lg border border-rose-500/25 bg-rose-500/[0.06] px-2 py-1 text-[9.5px] text-rose-700 dark:text-rose-300"
+            >
+              {fault}
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </div>
   );
 }
 

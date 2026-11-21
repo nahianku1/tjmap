@@ -300,8 +300,20 @@ export const api = {
     return request<Tj>(`/tjs/${id}`, { method: 'PATCH', ...jsonBody(input) });
   },
 
+  /** Moves the cables on one output core onto another free core of the joint. */
+  changeTjOutputCore(
+    id: string,
+    input: { fromLabel: string; toLabel: string },
+  ): Promise<Tj> {
+    return request<Tj>(`/tjs/${id}/output-core`, { method: 'PATCH', ...jsonBody(input) });
+  },
+
   deleteTj(id: string): Promise<{ ok: boolean }> {
     return request<{ ok: boolean }>(`/tjs/${id}`, { method: 'DELETE' });
+  },
+
+  link(id: string): Promise<FibreLink> {
+    return request<FibreLink>(`/links/${id}`);
   },
 
   createLink(input: LinkInput): Promise<FibreLink> {

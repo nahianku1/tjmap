@@ -25,10 +25,11 @@ import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { api, ApiError } from '@/lib/api';
 import { cn } from '@/lib/utils';
-import { FibreCorePicker } from '@/components/map/fibre-core-picker';
 import { OltFrontPanel } from '@/components/olt/olt-front-panel';
 import { SubAreaDialog } from '@/components/directory/sub-area-dialog';
-import type { Area, FibreLink, Olt, PonPort, PortStatus, SubArea } from '@/lib/types';
+import { displayCoreLabel } from '@/lib/fibre-cores';
+import { ponOnuCapacity, ponPortOccupancy } from '@/lib/pon-capacity';
+import type { Area, FibreLink, Olt, PonPort, SubArea } from '@/lib/types';
 
 const PON_DBM = [3, 5, 7, 9];
 const MAX_PORTS = 64;
@@ -61,18 +62,41 @@ function nextPortLabel(rows: { label: string }[], prefix: string): string {
   return `${prefix}1`;
 }
 
-function PortStatusPill({ status, joints }: { status?: PortStatus; joints?: number }) {
-  const inUse = status === 'in_use';
+function PortStatusPill({ port, capacity }: { port: PonPort; capacity: number }) {
+  const { onus, full } = ponPortOccupancy(port, capacity);
+  const inUse = port.status === 'in_use';
   return (
-    <span
-      title={inUse ? `${joints ?? 1} joints served` : 'No joints use this port'}
-      className={`shrink-0 rounded px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide ${
-        inUse
-          ? 'bg-amber-500/15 text-amber-700 dark:text-amber-300'
-          : 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300'
-      }`}
-    >
-      {inUse ? 'In use' : 'Free'}
+    <span className="flex shrink-0 items-center gap-1">
+      <span
+        title={`${onus} of ${capacity} ONUs provisioned on this PON port`}
+        className={`rounded px-1.5 py-0.5 font-mono text-[9.5px] font-semibold ${
+          full
+            ? 'bg-destructive/15 text-destructive'
+            : onus > 0
+              ? 'bg-sky-500/15 text-sky-700 dark:text-sky-300'
+              : 'bg-muted text-muted-foreground'
+        }`}
+      >
+        {onus}/{capacity} ONU
+      </span>
+      <span
+        title={
+          full
+            ? `This port serves its ${capacity}-ONU limit`
+            : inUse
+              ? `${port.joints ?? 1} joints served`
+              : 'No joints use this port'
+        }
+        className={`rounded px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide ${
+          full
+            ? 'bg-destructive/15 text-destructive'
+            : inUse
+              ? 'bg-amber-500/15 text-amber-700 dark:text-amber-300'
+              : 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300'
+        }`}
+      >
+        {full ? 'Full' : inUse ? 'In use' : 'Free'}
+      </span>
     </span>
   );
 }
@@ -114,6 +138,7 @@ export function OltDialog({
 }: OltDialogProps) {
   const [name, setName] = useState('');
   const [code, setCode] = useState('');
+  const [oltType, setOltType] = useState('gpon');
   const [ponRows, setPonRows] = useState<PonPort[]>([]);
   const [areaId, setAreaId] = useState('none');
   const [subAreaId, setSubAreaId] = useState('none');
@@ -125,6 +150,7 @@ export function OltDialog({
   const [subAreas, setSubAreas] = useState<SubArea[]>([]);
   const [subAreaFormOpen, setSubAreaFormOpen] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [portChanging, setPortChanging] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   // Closing by any route drops the draft so the next open shows the OLT as
@@ -133,6 +159,7 @@ export function OltDialog({
     if (open) return;
     setName('');
     setCode('');
+    setOltType('gpon');
     setPonRows([]);
     setAreaId('none');
     setSubAreaId('none');
@@ -142,6 +169,7 @@ export function OltDialog({
     setNotes('');
     setSubAreaFormOpen(false);
     setSaving(false);
+    setPortChanging(null);
     setError(null);
   }, [open]);
 
@@ -150,6 +178,7 @@ export function OltDialog({
     setError(null);
     setName(olt?.name ?? '');
     setCode(olt?.code ?? '');
+    setOltType(olt?.oltType ?? 'gpon');
     setPonRows(initialPonRows(olt));
     setAreaId(olt?.areaId ?? defaultAreaId ?? 'none');
     setSubAreaId(olt?.subAreaId ?? 'none');
@@ -220,6 +249,7 @@ export function OltDialog({
       const payload = {
         name: name.trim(),
         code: code.trim() ? code.trim().toUpperCase() : undefined,
+        oltType,
         ponPorts: ponRows.map((row) => ({
           label: row.label.trim(),
           name: row.name?.trim() || null,
@@ -245,11 +275,41 @@ export function OltDialog({
     }
   }
 
+  const ponCapacity = ponOnuCapacity(oltType);
+  const ponOnuTotal = ponRows.reduce((sum, row) => sum + (row.onus ?? 0), 0);
+  const ponFullCount = ponRows.filter((row) => ponPortOccupancy(row, ponCapacity).full).length;
   const areaSubAreas = subAreas.filter((subArea) => subArea.areaId === areaId);
   const activeArea = areas.find((area) => area.id === areaId) ?? null;
   const subAreaValue = areaSubAreas.some((subArea) => subArea.id === subAreaId)
     ? subAreaId
     : 'none';
+
+  const attachedLinks = olt
+    ? links.filter((link) => link.fromOltId === olt.id || link.toOltId === olt.id)
+    : [];
+
+  async function handleReassignPort(link: FibreLink, coreIndex: number, newPort: string | null) {
+    const key = `${link.id}-${coreIndex}`;
+    setPortChanging(key);
+    try {
+      const isFrom = link.fromOltId === olt?.id;
+      const existingCores = link.cores ?? [];
+      const updatedCores = existingCores.map((core, i) => {
+        if (i !== coreIndex) return core;
+        return {
+          ...core,
+          [isFrom ? 'fromCoreLabel' : 'toCoreLabel']: newPort,
+        };
+      });
+      await api.updateLink(link.id, { cores: updatedCores });
+      toast.success(newPort ? `Port changed to ${newPort}` : 'Port unassigned');
+      await onLinksChanged?.();
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : 'Could not change port');
+    } finally {
+      setPortChanging(null);
+    }
+  }
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -277,7 +337,7 @@ export function OltDialog({
             />
           </div>
 
-          <div className="grid gap-3 sm:grid-cols-2">
+          <div className="grid gap-3 sm:grid-cols-3">
             <div className="space-y-2">
               <Label htmlFor="olt-form-name">OLT name</Label>
               <Input
@@ -297,6 +357,21 @@ export function OltDialog({
                 onChange={(event) => setCode(event.target.value.toUpperCase())}
                 className="font-mono text-[12px] tracking-wide"
               />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="olt-form-type">OLT Type</Label>
+              <Select value={oltType} onValueChange={setOltType}>
+                <SelectTrigger id="olt-form-type" className="h-9 text-[12px]">
+                  <SelectValue placeholder="OLT Type" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="gpon">GPON</SelectItem>
+                  <SelectItem value="epon">EPON</SelectItem>
+                  <SelectItem value="xgs_pon">XGS-PON</SelectItem>
+                  <SelectItem value="xg_pon">XG-PON</SelectItem>
+                  <SelectItem value="combo">Combo PON</SelectItem>
+                </SelectContent>
+              </Select>
             </div>
           </div>
 
@@ -326,7 +401,11 @@ export function OltDialog({
                 <p className="text-[12px] font-semibold">PON ports</p>
                 <p className="text-[10px] text-muted-foreground">
                   {ponRows.filter((row) => row.status !== 'in_use').length} of {ponRows.length} free
-                  · label, optional name, output power and VLAN per port
+                  · {ponOnuTotal} ONUs
+                  {ponFullCount > 0 ? (
+                    <span className="font-semibold text-destructive"> · {ponFullCount} full</span>
+                  ) : null}
+                  {' '}· {ponCapacity} ONUs per port ({oltType.replace('_', '-').toUpperCase()})
                 </p>
               </div>
               <Button
@@ -359,7 +438,7 @@ export function OltDialog({
                     onChange={(event) => updatePon(index, { label: event.target.value })}
                     className="h-9 min-w-0 flex-1 font-mono text-[11.5px]"
                   />
-                  <PortStatusPill status={row.status} joints={row.joints} />
+                  <PortStatusPill port={row} capacity={ponCapacity} />
                   <Button
                     type="button"
                     variant="ghost"
@@ -512,13 +591,85 @@ export function OltDialog({
             Optional. OLTs with coordinates appear as cabinet pins on the map.
           </p>
 
-          {olt ? (
-            <FibreCorePicker
-              kind="olt"
-              deviceId={olt.id}
-              links={links}
-              onPatched={onLinksChanged}
-            />
+          {olt && attachedLinks.length > 0 ? (
+            <section className="space-y-2.5 rounded-xl border border-border bg-muted/20 p-3">
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="text-[12px] font-semibold">Port Change / Assignments</p>
+                  <p className="text-[10px] text-muted-foreground">
+                    Reassign connected cables or links to a different PON port on this OLT
+                  </p>
+                </div>
+                <span className="rounded bg-primary/10 px-2 py-0.5 text-[10px] font-medium text-primary">
+                  {attachedLinks.length} connected cable{attachedLinks.length === 1 ? '' : 's'}
+                </span>
+              </div>
+
+              <div className="space-y-2">
+                {attachedLinks.map((link) => {
+                  const isFrom = link.fromOltId === olt.id;
+                  const destCode = isFrom ? link.toCode : link.fromCode;
+                  const cores = link.cores ?? [];
+                  const activeCores = cores.filter((c) => Boolean(isFrom ? c.fromCoreLabel : c.toCoreLabel));
+                  const displayList = activeCores.length > 0 ? activeCores : cores.slice(0, 1);
+
+                  return (
+                    <div
+                      key={link.id}
+                      className="space-y-1.5 rounded-lg border border-border/60 bg-background/60 p-2.5"
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-mono text-[11.5px] font-semibold text-foreground">
+                          {link.fibreId}
+                        </span>
+                        <span className="text-[10px] text-muted-foreground">
+                          Connected to <strong className="font-mono">{destCode ?? 'Device'}</strong>
+                        </span>
+                      </div>
+
+                      {displayList.map((core) => {
+                        const coreIndex = cores.indexOf(core);
+                        const currentPort = isFrom ? core.fromCoreLabel : core.toCoreLabel;
+                        const key = `${link.id}-${coreIndex}`;
+
+                        return (
+                          <div key={key} className="flex items-center justify-between gap-2 pt-1">
+                            <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                              <span>Core {displayCoreLabel(core.label, coreIndex + 1)}:</span>
+                            </div>
+
+                            <div className="flex items-center gap-2">
+                              <Select
+                                value={currentPort ?? 'none'}
+                                disabled={portChanging === key}
+                                onValueChange={(val) =>
+                                  handleReassignPort(link, coreIndex, val === 'none' ? null : val)
+                                }
+                              >
+                                <SelectTrigger className="h-8 w-[160px] font-mono text-[11px]">
+                                  <SelectValue placeholder="Select PON port" />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  <SelectItem value="none">Unassigned</SelectItem>
+                                  {ponRows.map((port) => (
+                                    <SelectItem key={port.label} value={port.label}>
+                                      {port.label} {port.name ? `(${port.name})` : ''}
+                                    </SelectItem>
+                                  ))}
+                                </SelectContent>
+                              </Select>
+                              {portChanging === key ? (
+                                <Loader2 className="size-3.5 animate-spin text-muted-foreground" />
+                              ) : null}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  );
+                })}
+              </div>
+            </section>
           ) : null}
 
           <div className="space-y-2">

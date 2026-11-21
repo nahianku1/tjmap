@@ -43,6 +43,7 @@ import { cn, formatDistance } from '@/lib/utils';
 import { routeLengthMeters } from '@/lib/route';
 import { computePowerBudgets, computeSpanLoss, type PowerBudget } from '@/lib/power-budget';
 import { splitterFeedLabels, splitterFeedName, tjCoreUnavailable } from '@/lib/device-ports';
+import { ponOnuCapacity, tjPonPortLabel } from '@/lib/pon-capacity';
 import {
   CORES_PER_TUBE,
   displayCoreLabel,
@@ -52,6 +53,7 @@ import {
   uniqueCoreLabel,
   type FibreCableType,
 } from '@/lib/fibre-cores';
+import { FibreCorePicker } from '@/components/map/fibre-core-picker';
 
 const CORE_COLORS = Array.from({ length: 12 }, (_item, index) => tiaCoreColor(index + 1));
 
@@ -125,6 +127,24 @@ function makeRows(count: number, existing: CoreRow[] = []): CoreRow[] {
   });
 }
 
+function syncRowsFromLink(l: FibreLink): CoreRow[] {
+  const used = new Set<string>();
+  return l.cores.length > 0
+    ? l.cores.map((core, index) => {
+        const label = uniqueCoreLabel(displayCoreLabel(core.label, index + 1), used);
+        used.add(label);
+        return {
+          id: optionId(),
+          label,
+          color: core.color ?? CORE_COLORS[index % CORE_COLORS.length],
+          fromCore: core.fromCoreLabel ?? '',
+          toCore: core.toCoreLabel ?? '',
+          lossDb: Number(core.lossDb ?? 0),
+        };
+      })
+    : makeRows(l.coreCount);
+}
+
 interface LinkDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -171,6 +191,30 @@ export function LinkDialog({
   const editing = Boolean(link);
   // A link's own strands decide its construction; a new one uses the picked type.
   const type: FibreCableType = link ? inferFibreType(link) : fibreType;
+  const deviceKind: DeviceKind | null = link
+    ? link.fromTjId
+      ? 'tj'
+      : link.fromOltId
+        ? 'olt'
+        : link.fromOnuId
+          ? 'onu'
+          : link.toTjId
+            ? 'tj'
+            : link.toOltId
+              ? 'olt'
+              : link.toOnuId
+                ? 'onu'
+                : null
+    : null;
+  const deviceId = link
+    ? (link.fromTjId ??
+       link.fromOltId ??
+       link.fromOnuId ??
+       link.toTjId ??
+       link.toOltId ??
+       link.toOnuId ??
+       null)
+    : null;
   const [fromKey, setFromKey] = useState('');
   const [toKey, setToKey] = useState('');
   const [fibreId, setFibreId] = useState('');
@@ -234,26 +278,7 @@ export function LinkDialog({
       setStatus(link.status);
       setSubAreaId(link.subAreaId ?? 'none');
       setNotes(link.notes ?? '');
-      const used = new Set<string>();
-      setRows(
-        link.cores.length > 0
-          ? link.cores.map((core, index) => {
-              const label = uniqueCoreLabel(
-                displayCoreLabel(core.label, index + 1),
-                used,
-              );
-              used.add(label);
-              return {
-                id: optionId(),
-                label,
-                color: core.color ?? CORE_COLORS[index % CORE_COLORS.length],
-                fromCore: core.fromCoreLabel ?? '',
-                toCore: core.toCoreLabel ?? '',
-                lossDb: Number(core.lossDb ?? 0),
-              };
-            })
-          : makeRows(link.coreCount),
-      );
+      setRows(syncRowsFromLink(link));
       return;
     }
 
@@ -407,6 +432,55 @@ export function LinkDialog({
     [toKey, tjs, olts, onus, links],
   );
 
+  /**
+   * A real PON port serves a fixed number of ONUs (128 on GPON-class, 64 on
+   * EPON). When a new subscriber would land on a port that already serves its
+   * limit, the connection is refused before the server has to reject it.
+   */
+  const ponCapacityIssue = useMemo<string | null>(() => {
+    if (editing) return null;
+    const fromParts = splitKey(fromKey);
+    const toParts = splitKey(toKey);
+    if (!fromParts || !toParts) return null;
+    const onuPart = fromParts.kind === 'onu' ? fromParts : toParts.kind === 'onu' ? toParts : null;
+    const farPart = fromParts.kind === 'onu' ? toParts : toParts.kind === 'onu' ? fromParts : null;
+    if (!onuPart || !farPart) return null;
+    const onu = onus.find((item) => item.id === onuPart.id);
+    if (!onu) return null;
+    // A subscriber that is already patched only moves inside the PON; it takes no new slot.
+    if (links.some((item) => item.fromOnuId === onu.id || item.toOnuId === onu.id)) return null;
+
+    let olt: Olt | undefined;
+    let portLabel: string | null = null;
+    if (farPart.kind === 'olt') {
+      olt = olts.find((item) => item.id === farPart.id);
+      const side = fromParts.kind === 'olt' ? 'from' : 'to';
+      portLabel =
+        rows.map((row) => (side === 'from' ? row.fromCore : row.toCore)).find(Boolean) ??
+        olt?.ponPort ??
+        null;
+    } else if (farPart.kind === 'tj') {
+      const tj = tjs.find((item) => item.id === farPart.id);
+      if (!tj) return null;
+      olt = olts.find((item) => item.id === tj.oltId);
+      portLabel = tjPonPortLabel(tj, olt);
+    }
+    if (!olt) return null;
+
+    const label = (portLabel ?? '').trim().toLowerCase();
+    const ports = olt.ponPorts ?? [];
+    const port = label
+      ? ports.find((item) => item.label.trim().toLowerCase() === label) ?? null
+      : ports.length === 1
+        ? ports[0]
+        : null;
+    const capacity = port?.capacity ?? ponOnuCapacity(olt.oltType);
+    const served = port?.onus ?? 0;
+    if (served < capacity) return null;
+    const type = (olt.oltType ?? 'gpon').replace('_', '-').toUpperCase();
+    return `${olt.code}${port ? ` PON ${port.label}` : ''} is full — ${served}/${capacity} ONUs (${type} limit). Free a subscriber on this port, or patch the ONU onto another PON port.`;
+  }, [editing, fromKey, toKey, rows, tjs, olts, onus, links]);
+
   const connectedCount = rows.filter((row) => row.fromCore && row.toCore).length;
   const fromCode = deviceLabel(fromKey, tjs, olts, onus) ?? 'From device';
   const toCode = deviceLabel(toKey, tjs, olts, onus) ?? 'To device';
@@ -517,6 +591,7 @@ export function LinkDialog({
     if (!Number.isFinite(Number(coreCount)) || Number(coreCount) < 0) {
       return setError('Core count must be zero or more.');
     }
+    if (ponCapacityIssue) return setError(ponCapacityIssue);
 
     const cores = rows.map((row, index) => ({
       index: index + 1,
@@ -608,6 +683,13 @@ export function LinkDialog({
             <p className="truncate font-mono text-[12px] font-semibold">{toCode}</p>
           </div>
         </div>
+
+        {ponCapacityIssue ? (
+          <div className="flex items-start gap-2 rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2.5 text-[12px] text-amber-900 dark:text-amber-200">
+            <TriangleAlert className="mt-0.5 size-4 shrink-0" />
+            <span>{ponCapacityIssue}</span>
+          </div>
+        ) : null}
 
         <div className="flex flex-wrap items-center gap-2">
           <Badge variant={status === 'cut' ? 'cut' : 'active'}>{status === 'cut' ? 'Cut' : 'Active'}</Badge>
@@ -1100,6 +1182,19 @@ export function LinkDialog({
             </div>
           </section>
 
+          {editing && link && deviceKind && deviceId ? (
+            <FibreCorePicker
+              kind={deviceKind}
+              deviceId={deviceId}
+              links={[link]}
+              onPatched={async () => {
+                const fresh = await api.link(link.id);
+                setRows(syncRowsFromLink(fresh));
+                onSaved(fresh, 'update');
+              }}
+            />
+          ) : null}
+
           <div className="flex items-center justify-between gap-3 rounded-xl border border-white/60 bg-white/40 px-3 py-2.5 dark:border-white/10 dark:bg-white/[0.03]">
             <div>
               <p className="text-[12px] font-semibold">Link colour</p>
@@ -1230,8 +1325,7 @@ function deviceInfo(
   if (parts.kind === 'onu') {
     const onu = onus.find((item) => item.id === parts.id);
     if (!onu) return null;
-    const cores = onu.cores ?? [];
-    const used = cores.filter((core) => core.status === 'in_use').length;
+    const port = (onu.cores ?? [])[0];
     const area = [onu.districtName, onu.areaName].filter(Boolean).join(' · ') || null;
     const extra = [
       onu.fibreId ? `Fibre ${onu.fibreId}` : null,
@@ -1248,8 +1342,8 @@ function deviceInfo(
       address: null,
       lat: onu.lat,
       lng: onu.lng,
-      totalPorts: cores.length,
-      usedPorts: used,
+      totalPorts: 1,
+      usedPorts: port && port.status !== 'free' ? 1 : 0,
       linkCount: attached.length,
       extra: extra || null,
     };
@@ -1441,13 +1535,17 @@ function coreOptions(
   if (parts.kind === 'onu') {
     const onu = onus.find((item) => item.id === parts.id);
     if (!onu) return [];
-    return (onu.cores ?? []).map((core, index) => ({
-      id: optionId(),
-      label: core.label,
-      name: displayCoreLabel(core.label, index + 1),
-      hint: 'drop core',
-      used: core.status === 'in_use',
-    }));
+    // A real ONU has one PON input port: no colour, no user-given name.
+    const port = (onu.cores ?? [])[0];
+    return [
+      {
+        id: optionId(),
+        label: port?.label ?? 'PON',
+        name: 'Input port',
+        hint: 'ONU input',
+        used: (port?.status ?? 'free') !== 'free',
+      },
+    ];
   }
   if (parts.kind === 'tj') {
     const tj = tjs.find((item) => item.id === parts.id);

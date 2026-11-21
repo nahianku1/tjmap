@@ -23,12 +23,9 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
-import { CoreEditor } from '@/components/map/core-editor';
 import { api, ApiError } from '@/lib/api';
 import { ONU_CLASS_OPTIONS, getOnuClassInfo } from '@/lib/optical';
-import { tiaCoreColor, tiaCoreLabel } from '@/lib/fibre-cores';
-import { FibreCorePicker } from '@/components/map/fibre-core-picker';
-import type { Area, Core, FibreLink, Onu, OnuClass, PonType, SubArea } from '@/lib/types';
+import type { Area, FibreLink, Onu, OnuClass, PonType, SubArea } from '@/lib/types';
 
 interface OnuDialogProps {
   open: boolean;
@@ -40,21 +37,10 @@ interface OnuDialogProps {
   defaultAreaId?: string | null;
   /** Fibre ID of the link connected to this ONU; set, the field is read-only. */
   linkedFibreId?: string | null;
-  /** Fibre spans on this map, used to move the ONU onto another cable core. */
+  /** Fibre spans on this map (kept for API compatibility). */
   links?: FibreLink[];
   onLinksChanged?: () => void | Promise<void>;
   onSaved: (onu: Onu, mode: 'create' | 'update') => void;
-}
-
-const PALETTE = Array.from({ length: 12 }, (_item, index) => tiaCoreColor(index + 1));
-
-function defaultCore(index: number): Core {
-  return {
-    label: tiaCoreLabel(index),
-    color: PALETTE[(index - 1) % PALETTE.length],
-    count: 1,
-    status: 'free',
-  };
 }
 
 export function OnuDialog({
@@ -74,7 +60,6 @@ export function OnuDialog({
   const [fibreId, setFibreId] = useState('');
   const [ponType, setPonType] = useState<PonType>('gpon');
   const [onuClass, setOnuClass] = useState<OnuClass>('B+');
-  const [cores, setCores] = useState<Core[]>([defaultCore(1)]);
   const [areaId, setAreaId] = useState('none');
   const [subAreaId, setSubAreaId] = useState('none');
   const [lat, setLat] = useState('');
@@ -95,7 +80,6 @@ export function OnuDialog({
     setFibreId('');
     setPonType('gpon');
     setOnuClass('B+');
-    setCores([defaultCore(1)]);
     setAreaId('none');
     setSubAreaId('none');
     setLat('');
@@ -114,16 +98,6 @@ export function OnuDialog({
     setFibreId(linkedFibreId ?? onu?.fibreId ?? '');
     setPonType(onu?.ponType === 'epon' ? 'epon' : 'gpon');
     setOnuClass(getOnuClassInfo(onu?.ponType, onu?.onuClass).onuClass);
-    setCores(
-      onu?.cores?.length
-        ? onu.cores.map((core) => ({
-            label: core.label,
-            color: core.color || PALETTE[0],
-            count: 1,
-            status: core.status ?? 'free',
-          }))
-        : [defaultCore(1)],
-    );
     setAreaId(onu ? onu.areaId ?? 'none' : defaultAreaId ?? 'none');
     setSubAreaId(onu?.subAreaId ?? 'none');
     setLat(onu?.lat != null ? String(onu.lat) : draftPoint ? draftPoint.lat.toFixed(6) : '');
@@ -161,10 +135,6 @@ export function OnuDialog({
       setError('Username is required.');
       return;
     }
-    if (cores.length === 0) {
-      setError('Add at least one core for this fibre.');
-      return;
-    }
     if (Boolean(lat.trim()) !== Boolean(lng.trim())) {
       setError('Set both latitude and longitude, or leave both empty.');
       return;
@@ -192,11 +162,7 @@ export function OnuDialog({
         vlanId: parsedVlanId,
         ponType,
         onuClass,
-        cores: cores.map((core) => ({
-          label: core.label.trim() || 'Core',
-          color: core.color || PALETTE[0],
-          status: core.status ?? 'free',
-        })),
+        // The single PON input port is created and kept by the API.
         areaId: areaId === 'none' ? null : areaId,
         subAreaId: subAreaValue === 'none' ? null : subAreaValue,
         notes: notes.trim() || undefined,
@@ -208,9 +174,7 @@ export function OnuDialog({
       };
       const saved = onu ? await api.updateOnu(onu.id, payloadWithFibre) : await api.createOnu(payloadWithFibre);
       toast.success(onu ? `${saved.username} updated` : `${saved.username} added`, {
-        description: `${saved.fibreId ?? 'No fibre ID'} · ${saved.cores.length} core${
-          saved.cores.length === 1 ? '' : 's'
-        }${saved.lat != null ? ' · placed on map' : ''}`,
+        description: `${saved.fibreId ?? 'No fibre ID'}${saved.lat != null ? ' · placed on map' : ''}`,
       });
       onSaved(saved, onu ? 'update' : 'create');
       onOpenChange(false);
@@ -237,7 +201,7 @@ export function OnuDialog({
             {onu ? `Edit ${onu.username}` : 'Add ONU'}
           </DialogTitle>
           <DialogDescription>
-            Register the subscriber ONU with its fibre, MAC, VLAN and cores.
+            Register the subscriber ONU with its fibre, MAC, VLAN and PON port.
           </DialogDescription>
           {draftPoint ? (
             <p className="rounded-lg border border-amber-500/30 bg-amber-500/[0.08] px-2.5 py-1.5 font-mono text-[10.5px] text-amber-800 dark:text-amber-200">
@@ -402,37 +366,6 @@ export function OnuDialog({
               />
             </div>
           </section>
-
-          <section className="space-y-2 rounded-2xl border border-white/60 bg-white/40 p-3 dark:border-white/10 dark:bg-white/[0.03]">
-            <div className="flex items-center justify-between">
-              <Label className="text-[12px] font-semibold">Fibre cores</Label>
-              <span className="text-[10px] text-muted-foreground">
-                Add cores, set color/name & status
-              </span>
-            </div>
-            <p className="text-[10px] leading-relaxed text-muted-foreground">
-              Each core can be named, color-coded, and marked{' '}
-              <strong className="text-emerald-600 dark:text-emerald-400">Free</strong>,{' '}
-              <strong className="text-sky-600 dark:text-sky-400">In Use</strong>, or{' '}
-              <strong className="text-rose-600 dark:text-rose-400">Cut</strong> (tap status to cycle).
-            </p>
-
-            <CoreEditor
-              value={cores}
-              onChange={setCores}
-              addLabel="Add core"
-              emptyLabel="Add at least one core for this fibre"
-            />
-          </section>
-
-          {onu ? (
-            <FibreCorePicker
-              kind="onu"
-              deviceId={onu.id}
-              links={links}
-              onPatched={onLinksChanged}
-            />
-          ) : null}
 
           <div className="space-y-1.5">
             <Label htmlFor="onu-notes">Notes</Label>

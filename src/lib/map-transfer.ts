@@ -402,11 +402,6 @@ export async function importMapTransfer(
       vlanId: onu.vlanId ?? null,
       ponType: onu.ponType,
       onuClass: onu.onuClass,
-      cores: (onu.cores ?? []).map((core, index) => ({
-        label: core.label || tiaCoreLabel(index + 1),
-        color: core.color || tiaCoreColor(index + 1),
-        status: core.status ?? 'free',
-      })),
       areaId: targetAreaId,
       subAreaId: targetSubAreaId,
       lat: onu.lat ?? undefined,

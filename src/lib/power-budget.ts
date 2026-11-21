@@ -1,5 +1,10 @@
-import type { DeviceKind, FibreLink, Olt, Onu, Tj } from './types';
-import { getOnuClassInfo, getSplitterLossDb, type OnuClassInfo } from './optical';
+import type { DeviceKind, FibreLink, Olt, Onu, Splitter, Tj } from './types';
+import {
+  getOnuClassInfo,
+  getSplitterLossDb,
+  type OnuClassInfo,
+  type SplitRatio,
+} from './optical';
 
 /** Loss of one fusion splice, in dB. */
 export const SPLICE_LOSS_DB = 0.1;
@@ -27,6 +32,8 @@ export interface BudgetSpan {
   connectionLossDb: number;
   /** Cable strand this span uses, when the device is patched to a core. */
   coreLabel: string | null;
+  /** Operational status of the span; anything but active blocks the light. */
+  status: FibreLink['status'];
   /** Extra loss recorded on that strand (a repaired or degraded core). */
   extraLossDb: number;
   totalLossDb: number;
@@ -37,6 +44,9 @@ export interface BudgetSplitter {
   tjCode: string;
   ratio: string;
   lossDb: number;
+  /** The splitter's input strand, and whether the incoming span lands on it. */
+  feedCore: string | null;
+  fed: boolean;
 }
 
 export type BudgetStatus = 'ok' | 'marginal' | 'over' | 'overload';
@@ -129,19 +139,21 @@ function oltPonPort(link: FibreLink, olt: Olt) {
   return ports.find((port) => port.outputDbm !== null) ?? ports[0];
 }
 
-/**
- * Walks the graph from an ONU back to its serving OLT and accumulates every loss a
- * downstream signal meets: fibre attenuation over each span, fusion splices and
- * connectors on each span, and the insertion loss of each splitter the route passes
- * through. The shortest route wins, which is the physical tree path in practice.
- */
-export function computeOnuPowerBudget(
+/** The cable strands a link terminates on, when it touches this device. */
+function linkLocalCores(link: FibreLink, deviceId: string): string[] {
+  const atFrom = link.fromTjId === deviceId;
+  const atTo = link.toTjId === deviceId;
+  if (!atFrom && !atTo) return [];
+  return (link.cores ?? [])
+    .map((core) => (atFrom ? core.fromCoreLabel : core.toCoreLabel))
+    .filter((label): label is string => Boolean(label?.trim()));
+}
+
+/** Shortest physical route from the ONU back to an OLT, ignoring link health. */
+function findOnuRoute(
   onu: Onu,
-  tjs: Tj[],
-  olts: Olt[],
   links: FibreLink[],
-  onus: Onu[] = [onu],
-): PowerBudget | null {
+): { nodes: NodeKey[]; linksDesc: FibreLink[] } | null {
   const startKey: NodeKey = `onu:${onu.id}`;
   const adjacency = new Map<NodeKey, { link: FibreLink; other: NodeKey }[]>();
 
@@ -195,7 +207,60 @@ export function computeOnuPowerBudget(
     nodes.push(cursor);
   }
 
-  const olt = olts.find((item) => item.id === oltKey!.split(':')[1]);
+  return { nodes, linksDesc };
+}
+
+/**
+ * The splitter a route passes through at one joint, plus whether its input core
+ * is actually fed by the incoming span. Only a fed splitter can hand light on.
+ */
+function splitterOnRoute(
+  tj: Tj,
+  incoming: FibreLink | undefined,
+  outgoing: FibreLink | undefined,
+): { splitter: Splitter & { ratio: SplitRatio }; feedCore: string | null; fed: boolean } | null {
+  const fitted = (tj.splitters?.length ? tj.splitters : tj.splitter ? [tj.splitter] : []).filter(
+    (item): item is Splitter & { ratio: SplitRatio } => Boolean(item?.enabled && item.ratio),
+  );
+  if (fitted.length === 0) return null;
+
+  const outgoingCores = outgoing ? linkLocalCores(outgoing, tj.id) : [];
+  const splitter =
+    fitted.find((item) =>
+      (item.outputs ?? []).some((core) => outgoingCores.includes(core.label)),
+    ) ?? fitted[0];
+  if (!splitter.ratio) return null;
+
+  const feedCore = splitter.inputCoreLabel?.trim() || null;
+  const incomingCores = incoming ? linkLocalCores(incoming, tj.id) : [];
+  const normalisedFeed = feedCore?.toLowerCase() ?? null;
+  // Links saved without per-core rows still count as patched; a labelled span
+  // must actually terminate on the splitter's input core.
+  const fed =
+    Boolean(normalisedFeed) &&
+    (incomingCores.length === 0 ||
+      incomingCores.some((label) => label.trim().toLowerCase() === normalisedFeed));
+  return { splitter, feedCore, fed };
+}
+
+/**
+ * Walks the graph from an ONU back to its serving OLT and accumulates every loss a
+ * downstream signal meets: fibre attenuation over each span, fusion splices and
+ * connectors on each span, and the insertion loss of each splitter the route passes
+ * through. The shortest route wins, which is the physical tree path in practice.
+ */
+export function computeOnuPowerBudget(
+  onu: Onu,
+  tjs: Tj[],
+  olts: Olt[],
+  links: FibreLink[],
+  onus: Onu[] = [onu],
+): PowerBudget | null {
+  const path = findOnuRoute(onu, links);
+  if (!path) return null;
+  const { nodes, linksDesc } = path;
+
+  const olt = olts.find((item) => item.id === nodes[0]?.split(':')[1]);
   if (!olt) return null;
 
   const firstSpan = linksDesc[0];
@@ -208,7 +273,13 @@ export function computeOnuPowerBudget(
 
   /** The cable strand a device terminates on, and whether that core is broken. */
   const strandFor = (key: NodeKey | undefined, link: FibreLink) => {
-    if (!key) return { label: null as string | null, extraLossDb: 0, fault: null as string | null };
+    if (!key)
+      return {
+        label: null as string | null,
+        localCore: null as string | null,
+        extraLossDb: 0,
+        fault: null as string | null,
+      };
     const [kind, id] = key.split(':');
     const atFrom =
       (kind === 'tj' && link.fromTjId === id) ||
@@ -217,7 +288,13 @@ export function computeOnuPowerBudget(
     const row = (link.cores ?? []).find((core) =>
       Boolean(atFrom ? core.fromCoreLabel : core.toCoreLabel),
     );
-    if (!row) return { label: null as string | null, extraLossDb: 0, fault: null as string | null };
+    if (!row)
+      return {
+        label: null as string | null,
+        localCore: null as string | null,
+        extraLossDb: 0,
+        fault: null as string | null,
+      };
     const localCore = (atFrom ? row.fromCoreLabel : row.toCoreLabel) ?? null;
     let fault: string | null = null;
     if (kind === 'tj') {
@@ -233,6 +310,7 @@ export function computeOnuPowerBudget(
     }
     return {
       label: row.label,
+      localCore,
       extraLossDb: round2(Number(row.lossDb ?? 0)),
       fault,
     };
@@ -263,6 +341,7 @@ export function computeOnuPowerBudget(
       spliceLossDb,
       connectionLossDb,
       coreLabel: strand.label,
+      status: link.status,
       extraLossDb: strand.extraLossDb,
       totalLossDb: round2(fibreLossDb + spliceLossDb + connectionLossDb + strand.extraLossDb),
     };
@@ -274,33 +353,21 @@ export function computeOnuPowerBudget(
     if (!key || !key.startsWith('tj:')) continue;
     const tj = tjs.find((item) => item.id === key.split(':')[1]);
     if (!tj) continue;
-    // A joint may carry several splitters, but each is its own parallel feed: only
-    // the splitter whose output leg the route leaves through adds loss here.
-    const fitted = (tj.splitters?.length ? tj.splitters : tj.splitter ? [tj.splitter] : []).filter(
-      (splitter) => splitter?.enabled && splitter.ratio,
-    );
-    if (fitted.length === 0) continue;
-
-    const outgoing = linksDesc[index];
-    const atFrom = outgoing?.fromTjId === tj.id;
-    const atTo = outgoing?.toTjId === tj.id;
-    let localCore: string | null = null;
-    if (outgoing && (atFrom || atTo)) {
-      const row = (outgoing.cores ?? []).find((core) =>
-        Boolean(atFrom ? core.fromCoreLabel : core.toCoreLabel),
-      );
-      localCore = row ? (atFrom ? row.fromCoreLabel : row.toCoreLabel) : null;
-    }
-    const splitter =
-      fitted.find((item) =>
-        (item.outputs ?? []).some((core) => core.label === localCore),
-      ) ?? fitted[0];
-    if (!splitter?.ratio) continue;
+    // A joint may carry several splitters; only the one the route leaves through
+    // is in this path.
+    const found = splitterOnRoute(tj, linksDesc[index - 1], linksDesc[index]);
+    if (!found) continue;
+    // Light reaches a splitter's legs only through its input core. A splitter
+    // without a feed, or with the incoming span patched to another core, cannot
+    // power an ONU below it, so no budget applies.
+    if (!found.fed) return null;
     splitters.push({
       tjId: tj.id,
       tjCode: tj.code,
-      ratio: splitter.ratio,
-      lossDb: getSplitterLossDb(splitter.ratio, 0.2),
+      ratio: found.splitter.ratio,
+      lossDb: getSplitterLossDb(found.splitter.ratio, 0.2),
+      feedCore: found.feedCore,
+      fed: found.fed,
     });
   }
 
@@ -360,6 +427,170 @@ export function computeOnuPowerBudget(
     status,
     hasCut: linksDesc.some((link) => link.status === 'cut'),
     coreFaults,
+  };
+}
+
+export type OnuChainStatus = 'ok' | 'cut' | 'unfed' | 'open';
+
+export interface OnuChainSpan {
+  linkId: string;
+  fibreId: string;
+  fromCode: string;
+  toCode: string;
+  status: FibreLink['status'];
+  lengthM: number | null;
+  coreLabel: string | null;
+}
+
+export interface OnuChainSplitter {
+  tjId: string;
+  tjCode: string;
+  ratio: string;
+  feedCore: string | null;
+  fed: boolean;
+}
+
+export interface OnuChainDiagnosis {
+  status: OnuChainStatus;
+  title: string;
+  detail: string;
+  route: PowerBudget['route'];
+  spans: OnuChainSpan[];
+  splitters: OnuChainSplitter[];
+  faults: string[];
+}
+
+/**
+ * Physical state of the ONU's chain back to the OLT, independent of whether an
+ * optical budget can be calculated. It names each span's health, each splitter's
+ * feed state and the exact break, so the panel stays informative while the link
+ * is down or a fibre is cut.
+ */
+export function diagnoseOnuChain(
+  onu: Onu,
+  tjs: Tj[],
+  olts: Olt[],
+  links: FibreLink[],
+  onus: Onu[] = [onu],
+): OnuChainDiagnosis {
+  const route = findOnuRoute(onu, links);
+
+  if (!route) {
+    const directSpans: OnuChainSpan[] = links
+      .filter((link) => link.fromOnuId === onu.id || link.toOnuId === onu.id)
+      .map((link) => ({
+        linkId: link.id,
+        fibreId: link.fibreId,
+        fromCode: link.fromCode,
+        toCode: link.toCode,
+        status: link.status,
+        lengthM: link.lengthM ?? null,
+        coreLabel: null,
+      }));
+    const downSpans = directSpans.filter((span) => span.status !== 'active');
+    return {
+      status: 'open',
+      title: downSpans.length > 0 ? 'Drop cable cut' : 'No path to OLT',
+      detail:
+        downSpans.length > 0
+          ? `${downSpans.map((span) => span.fibreId).join(', ')} is down, so no light reaches this ONU.`
+          : 'No fibre path from this ONU back to an OLT. Check the drop cable and the upstream links.',
+      route: [],
+      spans: directSpans,
+      splitters: [],
+      faults: downSpans.map((span) => `${span.fibreId} is ${span.status}`),
+    };
+  }
+
+  const { nodes, linksDesc } = route;
+  const info = nodes.map((key) => nodeInfo(key, tjs, olts, onus));
+  const routeNodes = info.filter(
+    (item): item is NonNullable<typeof item> => item !== null,
+  );
+
+  const spans: OnuChainSpan[] = linksDesc.map((link, index) => {
+    const fromKey = nodes[index];
+    const toKey = nodes[index + 1];
+    const localCores = fromKey?.startsWith('tj:')
+      ? linkLocalCores(link, fromKey.split(':')[1])
+      : [];
+    return {
+      linkId: link.id,
+      fibreId: link.fibreId,
+      fromCode: info[index]?.code ?? link.fromCode,
+      toCode: info[index + 1]?.code ?? link.toCode,
+      status: link.status,
+      lengthM: link.lengthM ?? null,
+      coreLabel: localCores[0] ?? null,
+    };
+  });
+
+  const splitters: OnuChainSplitter[] = [];
+  const faults: string[] = [];
+  for (let index = 1; index < nodes.length - 1; index += 1) {
+    const key = nodes[index];
+    if (!key?.startsWith('tj:')) continue;
+    const tj = tjs.find((item) => item.id === key.split(':')[1]);
+    if (!tj) continue;
+    const found = splitterOnRoute(tj, linksDesc[index - 1], linksDesc[index]);
+    if (!found) continue;
+    splitters.push({
+      tjId: tj.id,
+      tjCode: tj.code,
+      ratio: found.splitter.ratio,
+      feedCore: found.feedCore,
+      fed: found.fed,
+    });
+    if (!found.fed) {
+      faults.push(
+        `${tj.code} splitter ${found.splitter.ratio}${
+          found.feedCore ? ` (feed ${found.feedCore})` : ''
+        } has no input cable`,
+      );
+    }
+  }
+
+  const downSpans = spans.filter((span) => span.status !== 'active');
+  downSpans.forEach((span) => faults.push(`${span.fibreId} is ${span.status}`));
+  const unfedSplitter = splitters.some((splitter) => !splitter.fed);
+
+  if (downSpans.length > 0) {
+    return {
+      status: 'cut',
+      title: `${downSpans.length} span${downSpans.length > 1 ? 's' : ''} down`,
+      detail: `${downSpans.map((span) => span.fibreId).join(', ')} ${
+        downSpans.length > 1 ? 'are' : 'is'
+      } not carrying light. Any power figures below describe the intact path.`,
+      route: routeNodes,
+      spans,
+      splitters,
+      faults,
+    };
+  }
+
+  if (unfedSplitter) {
+    return {
+      status: 'unfed',
+      title: 'Splitter unfed',
+      detail:
+        'A splitter on this chain has no input cable on its feed core, so no optical power reaches its legs.',
+      route: routeNodes,
+      spans,
+      splitters,
+      faults,
+    };
+  }
+
+  return {
+    status: 'ok',
+    title: 'Chain intact',
+    detail: `${spans.length} span${spans.length === 1 ? '' : 's'} · ${
+      splitters.length
+    } splitter${splitters.length === 1 ? '' : 's'} · no faults detected`,
+    route: routeNodes,
+    spans,
+    splitters,
+    faults,
   };
 }
 

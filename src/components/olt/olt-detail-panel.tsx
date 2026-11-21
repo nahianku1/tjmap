@@ -17,6 +17,7 @@ import { Button } from '@/components/ui/button';
 import { CorePatchLine, linkPatches, type CorePatch } from '@/components/map/core-patch-line';
 import type { FibreLink, Olt } from '@/lib/types';
 import { formatDistance } from '@/lib/utils';
+import { ponOnuCapacity, ponPortOccupancy } from '@/lib/pon-capacity';
 
 interface OltDetailPanelProps {
   olt: Olt | null;
@@ -49,6 +50,18 @@ export function OltDetailPanel({
     () => (olt ? linkPatches(links, { kind: 'olt', id: olt.id }) : new Map()),
     [links, olt],
   );
+  const ponOnu = useMemo(
+    () =>
+      olt
+        ? olt.ponPorts.reduce((sum, port) => sum + ponPortOccupancy(port, ponOnuCapacity(olt.oltType)).onus, 0)
+        : 0,
+    [olt],
+  );
+  const ponFull = useMemo(
+    () =>
+      olt ? olt.ponPorts.filter((port) => ponPortOccupancy(port, ponOnuCapacity(olt.oltType)).full).length : 0,
+    [olt],
+  );
   const [copied, setCopied] = useState(false);
 
   async function copyCoordinates() {
@@ -74,7 +87,7 @@ export function OltDetailPanel({
                   {olt.code}
                 </span>
                 <span className="rounded-md bg-teal-500/15 px-2 py-0.5 text-[9.5px] font-semibold uppercase tracking-[0.14em] text-teal-700 dark:text-teal-300">
-                  OLT
+                  {olt.oltType ? `${olt.oltType.replace('_', '-')} OLT` : 'OLT'}
                 </span>
               </div>
               <SheetTitle className="font-display text-[17px]">{olt.name}</SheetTitle>
@@ -93,7 +106,10 @@ export function OltDetailPanel({
                   </p>
                   <span className="font-mono text-[10px] text-muted-foreground">
                     {olt.ponPorts.filter((port) => port.status !== 'in_use').length} free ·{' '}
-                    {olt.ponPorts.length}
+                    {olt.ponPorts.length} · {ponOnu} ONUs
+                    {ponFull > 0 ? (
+                      <span className="font-semibold text-destructive"> · {ponFull} full</span>
+                    ) : null}
                   </span>
                 </div>
                 {olt.ponPorts.length > 0 ? (
@@ -122,20 +138,39 @@ export function OltDetailPanel({
                               </span>
                             ) : null}
                             <span
-                              title={
-                                port.status === 'in_use'
-                                  ? `${port.joints ?? 1} joints served`
-                                  : 'No joints use this port'
-                              }
-                              className={`rounded px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide ${
-                                port.status === 'in_use'
-                                  ? 'bg-amber-500/15 text-amber-700 dark:text-amber-300'
-                                  : 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300'
+                              title={`${ponPortOccupancy(port, ponOnuCapacity(olt.oltType)).onus} of ${
+                                ponPortOccupancy(port, ponOnuCapacity(olt.oltType)).capacity
+                              } ONUs provisioned on this PON port`}
+                              className={`rounded px-1.5 py-0.5 font-mono text-[9.5px] font-semibold ${
+                                ponPortOccupancy(port, ponOnuCapacity(olt.oltType)).full
+                                  ? 'bg-destructive/15 text-destructive'
+                                  : 'bg-sky-500/15 text-sky-700 dark:text-sky-300'
                               }`}
                             >
-                              {port.status === 'in_use'
-                                ? `In use${port.joints ? ` · ${port.joints}` : ''}`
-                                : 'Free'}
+                              {ponPortOccupancy(port, ponOnuCapacity(olt.oltType)).onus}/
+                              {ponPortOccupancy(port, ponOnuCapacity(olt.oltType)).capacity} ONU
+                            </span>
+                            <span
+                              title={
+                                ponPortOccupancy(port, ponOnuCapacity(olt.oltType)).full
+                                  ? `This port serves its ${ponPortOccupancy(port, ponOnuCapacity(olt.oltType)).capacity}-ONU limit`
+                                  : port.status === 'in_use'
+                                    ? `${port.joints ?? 1} joints served`
+                                    : 'No joints use this port'
+                              }
+                              className={`rounded px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide ${
+                                ponPortOccupancy(port, ponOnuCapacity(olt.oltType)).full
+                                  ? 'bg-destructive/15 text-destructive'
+                                  : port.status === 'in_use'
+                                    ? 'bg-amber-500/15 text-amber-700 dark:text-amber-300'
+                                    : 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300'
+                              }`}
+                            >
+                              {ponPortOccupancy(port, ponOnuCapacity(olt.oltType)).full
+                                ? 'Full'
+                                : port.status === 'in_use'
+                                  ? `In use${port.joints ? ` · ${port.joints}` : ''}`
+                                  : 'Free'}
                             </span>
                           </span>
                         </div>

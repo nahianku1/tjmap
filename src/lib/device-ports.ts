@@ -159,11 +159,15 @@ export function devicePorts(
 
   const onu = onus.find((item) => item.id === id);
   if (!onu) return [];
-  return (onu.cores ?? []).map((core, index) => ({
-    label: core.label,
-    name: displayCoreLabel(core.label, index + 1),
-    hint: 'drop core',
-    used: (core.status ?? 'free') !== 'free',
-    color: core.color ?? null,
-  }));
+  // A real ONU has a single PON input port, with no colour and no core name.
+  const port = (onu.cores ?? [])[0];
+  return [
+    {
+      label: port?.label ?? 'PON',
+      name: 'Input port',
+      hint: 'ONU input',
+      used: (port?.status ?? 'free') !== 'free',
+      color: null,
+    },
+  ];
 }
