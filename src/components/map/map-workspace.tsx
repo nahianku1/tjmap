@@ -1065,7 +1065,7 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
             const result = await importMapTransfer(
               { ...layer.file, areaId, subAreaId: subArea.id, links: [] },
               areaId,
-              { tjs: scope.tjs, olts: scope.olts },
+              { tjs: scope.tjs, olts: scope.olts, onus: scope.onus },
               {
                 replaceExisting: options.replace && index === 0,
                 current: options.replace && index === 0 ? { tjs, olts, onus, links } : undefined,
@@ -1082,6 +1082,7 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
 
           // Links come last so a line in one layer can join devices created for
           // another layer.
+          const linkScope = await api.network();
           for (const [index, layer] of layers.entries()) {
             if (layer.file.links.length === 0) continue;
             const subArea = targets[index];
@@ -1095,7 +1096,7 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
                 onus: [],
               },
               areaId,
-              { tjs: [], olts: [] },
+              { tjs: [], olts: [], links: linkScope.links },
               { targetSubAreaId: subArea.id, sharedIdMap: idMap },
             );
             totals.links += result.links;
@@ -1119,7 +1120,7 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
       const result = await importMapTransfer(
         file,
         areaId ?? null,
-        { tjs: scope.tjs, olts: scope.olts },
+        { tjs: scope.tjs, olts: scope.olts, onus: scope.onus, links: scope.links },
         {
           replaceExisting: options.replace,
           current: { tjs, olts, onus, links },
@@ -1193,7 +1194,7 @@ export function MapWorkspace({ areaId }: { areaId?: string }) {
       const result = await importMapTransfer(
         payload.file,
         areaId ?? null,
-        { tjs: scope.tjs, olts: scope.olts },
+        { tjs: scope.tjs, olts: scope.olts, onus: scope.onus, links: scope.links },
         {
           replaceExisting: options.replace,
           current: subAreaSnapshot(target),

@@ -43,7 +43,7 @@ import { cn, formatDistance } from '@/lib/utils';
 import { routeLengthMeters } from '@/lib/route';
 import { computePowerBudgets, computeSpanLoss, type PowerBudget } from '@/lib/power-budget';
 import { splitterFeedLabels, splitterFeedName, tjCoreUnavailable } from '@/lib/device-ports';
-import { ponOnuCapacity, tjPonPortLabel } from '@/lib/pon-capacity';
+import { ponOltFamily, ponOnuCapacity, ponOnuFamily, tjPonPortLabel } from '@/lib/pon-capacity';
 import {
   CORES_PER_TUBE,
   displayCoreLabel,
@@ -219,9 +219,9 @@ export function LinkDialog({
   const [toKey, setToKey] = useState('');
   const [fibreId, setFibreId] = useState('');
   const [coreCount, setCoreCount] = useState('4');
-  const [attenuation, setAttenuation] = useState('0.35');
+  const [attenuation, setAttenuation] = useState('0.5');
   const [spliceCount, setSpliceCount] = useState('2');
-  const [connectionLoss, setConnectionLoss] = useState('1');
+  const [connectionLoss, setConnectionLoss] = useState('0.2');
   const [rows, setRows] = useState<CoreRow[]>([]);
   const [status, setStatus] = useState<LinkStatus>('active');
   const [color, setColor] = useState<string | null>(null);
@@ -239,10 +239,10 @@ export function LinkDialog({
     setFromKey('');
     setToKey('');
     setFibreId('');
-    setCoreCount(String(CORES_PER_TUBE));
-    setAttenuation('0.35');
+    setCoreCount('4');
+    setAttenuation('0.5');
     setSpliceCount('2');
-    setConnectionLoss('1');
+    setConnectionLoss('0.2');
     setRows([]);
     setStatus('active');
     setColor(null);
@@ -271,9 +271,9 @@ export function LinkDialog({
       );
       setFibreId(link.fibreId);
       setCoreCount(String(link.coreCount || link.cores.length || 0));
-      setAttenuation(String(link.attenuationDbPerKm ?? 0.35));
+      setAttenuation(String(link.attenuationDbPerKm ?? 0.5));
       setSpliceCount(String(link.spliceCount ?? 2));
-      setConnectionLoss(String(link.connectionLossDb ?? 1));
+      setConnectionLoss(String(link.connectionLossDb ?? 0.2));
       setColor(link.color ?? null);
       setStatus(link.status);
       setSubAreaId(link.subAreaId ?? 'none');
@@ -285,14 +285,14 @@ export function LinkDialog({
     setFromKey(keyOf(from));
     setToKey(keyOf(to));
     setFibreId('');
-    setCoreCount(String(CORES_PER_TUBE));
-    setAttenuation('0.35');
+    setCoreCount('4');
+    setAttenuation('0.5');
     setSpliceCount('2');
-    setConnectionLoss('1');
+    setConnectionLoss('0.2');
     setColor(null);
-    // Both constructions start with 12 strands; names follow the TIA colour
+    // New cables start with 4 strands; names follow the TIA colour
     // code and ports picked in the map connection tool land on the first strand.
-    const fresh = makeRows(CORES_PER_TUBE);
+    const fresh = makeRows(4);
     fresh[0] = { ...fresh[0], fromCore: fromPort ?? '', toCore: toPort ?? '' };
     setRows(fresh);
     setStatus('active');
@@ -361,9 +361,9 @@ export function LinkDialog({
       const parsed = Number(value);
       return Number.isFinite(parsed) ? parsed : fallback;
     };
-    const attenuationDbPerKm = Math.min(Math.max(num(attenuation, 0.35), 0), 5);
+    const attenuationDbPerKm = Math.min(Math.max(num(attenuation, 0.5), 0), 5);
     const splices = Math.max(0, Math.round(num(spliceCount, 2)));
-    const connectionLossDb = Math.min(Math.max(num(connectionLoss, 1), 0), 20);
+    const connectionLossDb = Math.min(Math.max(num(connectionLoss, 0.2), 0), 20);
     const lengthM = distance ?? link?.lengthM ?? null;
     const spanLoss = computeSpanLoss({
       lengthM,
@@ -474,10 +474,20 @@ export function LinkDialog({
       : ports.length === 1
         ? ports[0]
         : null;
+    const type = (olt.oltType ?? 'gpon').replace('_', '-').toUpperCase();
+    // A line card only speaks its own standard: EPON ports take EPON ONUs and
+    // GPON/XG(S)-PON ports take GPON ONUs.
+    const oltFamily = ponOltFamily(olt.oltType);
+    const onuFamily = ponOnuFamily(onu.ponType);
+    if (oltFamily !== 'both' && oltFamily !== onuFamily) {
+      const onuLabel = onuFamily.toUpperCase();
+      const article = (word: string) => (/^[aeioux]/i.test(word) ? 'an' : 'a');
+      return `${olt.code}${port ? ` PON ${port.label}` : ''} is ${article(type)} ${type} port and only serves ${type} ONUs — ${onu.username} is ${article(onuLabel)} ${onuLabel} ONU. Patch it onto ${article(onuLabel)} ${onuLabel} OLT port, or change the ONU's PON technology.`;
+    }
+
     const capacity = port?.capacity ?? ponOnuCapacity(olt.oltType);
     const served = port?.onus ?? 0;
     if (served < capacity) return null;
-    const type = (olt.oltType ?? 'gpon').replace('_', '-').toUpperCase();
     return `${olt.code}${port ? ` PON ${port.label}` : ''} is full — ${served}/${capacity} ONUs (${type} limit). Free a subscriber on this port, or patch the ONU onto another PON port.`;
   }, [editing, fromKey, toKey, rows, tjs, olts, onus, links]);
 
@@ -605,9 +615,9 @@ export function LinkDialog({
     const payload = {
       fibreId: fibreId.trim(),
       coreCount: cores.length,
-      attenuationDbPerKm: Number.isFinite(Number(attenuation)) ? Number(attenuation) : 0.35,
+      attenuationDbPerKm: Number.isFinite(Number(attenuation)) ? Number(attenuation) : 0.5,
       spliceCount: Number.isFinite(Number(spliceCount)) ? Math.max(0, Math.round(Number(spliceCount))) : 2,
-      connectionLossDb: Number.isFinite(Number(connectionLoss)) ? Number(connectionLoss) : 1,
+      connectionLossDb: Number.isFinite(Number(connectionLoss)) ? Number(connectionLoss) : 0.2,
       color: color ?? null,
       fromCoreLabel: cores.find((core) => core.fromCoreLabel)?.fromCoreLabel ?? null,
       toCoreLabel: cores.find((core) => core.toCoreLabel)?.toCoreLabel ?? null,

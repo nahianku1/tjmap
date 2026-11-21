@@ -56,7 +56,6 @@ export function OnuDialog({
 }: OnuDialogProps) {
   const [username, setUsername] = useState('');
   const [macAddress, setMacAddress] = useState('');
-  const [vlanId, setVlanId] = useState('');
   const [fibreId, setFibreId] = useState('');
   const [ponType, setPonType] = useState<PonType>('gpon');
   const [onuClass, setOnuClass] = useState<OnuClass>('B+');
@@ -76,7 +75,6 @@ export function OnuDialog({
     if (open) return;
     setUsername('');
     setMacAddress('');
-    setVlanId('');
     setFibreId('');
     setPonType('gpon');
     setOnuClass('B+');
@@ -94,7 +92,6 @@ export function OnuDialog({
     setError(null);
     setUsername(onu?.username ?? '');
     setMacAddress(onu?.macAddress ?? '');
-    setVlanId(onu?.vlanId != null ? String(onu.vlanId) : '');
     setFibreId(linkedFibreId ?? onu?.fibreId ?? '');
     setPonType(onu?.ponType === 'epon' ? 'epon' : 'gpon');
     setOnuClass(getOnuClassInfo(onu?.ponType, onu?.onuClass).onuClass);
@@ -135,20 +132,19 @@ export function OnuDialog({
       setError('Username is required.');
       return;
     }
+    if (!mac) {
+      setError('MAC address is required.');
+      return;
+    }
+    if (!/^[0-9a-f]{12}$/i.test(mac.replace(/[\s:.-]/g, ''))) {
+      setError('MAC address must be 12 hexadecimal digits, e.g. AA:BB:CC:DD:EE:FF.');
+      return;
+    }
     if (Boolean(lat.trim()) !== Boolean(lng.trim())) {
       setError('Set both latitude and longitude, or leave both empty.');
       return;
     }
 
-    const vidRaw = vlanId.trim();
-    const parsedVlanId = vidRaw ? Number(vidRaw) : null;
-    if (
-      parsedVlanId !== null &&
-      (!Number.isInteger(parsedVlanId) || parsedVlanId < 1 || parsedVlanId > 4094)
-    ) {
-      setError('VLAN ID must be a whole number between 1 and 4094.');
-      return;
-    }
     // Validate fibre ID length (optional field, but if provided must be 1-60 chars).
     if (fid && fid.length < 1) return setError('Fibre ID must be at least 1 character.');
     if (fid && fid.length > 60) return setError('Fibre ID must be at most 60 characters.');
@@ -158,8 +154,7 @@ export function OnuDialog({
     try {
       const payload = {
         username: name,
-        macAddress: mac || undefined,
-        vlanId: parsedVlanId,
+        macAddress: mac,
         ponType,
         onuClass,
         // The single PON input port is created and kept by the API.
@@ -201,7 +196,8 @@ export function OnuDialog({
             {onu ? `Edit ${onu.username}` : 'Add ONU'}
           </DialogTitle>
           <DialogDescription>
-            Register the subscriber ONU with its fibre, MAC, VLAN and PON port.
+            Register the subscriber ONU with its fibre, MAC and PON port. The
+            VLAN is assigned automatically from the PON port it is patched to.
           </DialogDescription>
           {draftPoint ? (
             <p className="rounded-lg border border-amber-500/30 bg-amber-500/[0.08] px-2.5 py-1.5 font-mono text-[10.5px] text-amber-800 dark:text-amber-200">
@@ -227,26 +223,16 @@ export function OnuDialog({
               <Label htmlFor="onu-mac-address">MAC address</Label>
               <Input
                 id="onu-mac-address"
+                required
                 placeholder="AA:BB:CC:DD:EE:FF"
                 value={macAddress}
                 onChange={(e) => setMacAddress(e.target.value)}
                 className="font-mono text-[12px]"
                 autoComplete="off"
               />
-            </div>
-            <div className="space-y-1.5">
-              <Label htmlFor="onu-vlan-id">VLAN ID</Label>
-              <Input
-                id="onu-vlan-id"
-                type="number"
-                inputMode="numeric"
-                min={1}
-                max={4094}
-                placeholder="100"
-                value={vlanId}
-                onChange={(e) => setVlanId(e.target.value)}
-                className="font-mono text-[12px]"
-              />
+              <p className="text-[10px] text-muted-foreground">
+                Required — one MAC address can only be registered once across the network.
+              </p>
             </div>
             <div className="space-y-1.5 sm:col-span-2">
               <Label htmlFor="onu-fibre-id">Fibre ID</Label>

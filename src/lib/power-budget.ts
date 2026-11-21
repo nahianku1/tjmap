@@ -9,9 +9,9 @@ import {
 /** Loss of one fusion splice, in dB. */
 export const SPLICE_LOSS_DB = 0.1;
 /** Fallback fibre attenuation (dB/km) when a span has no value recorded. */
-export const DEFAULT_ATTENUATION_DB_PER_KM = 0.35;
+export const DEFAULT_ATTENUATION_DB_PER_KM = 0.5;
 /** Fallback connector / patch-panel loss for a span. */
-export const DEFAULT_CONNECTION_LOSS_DB = 1;
+export const DEFAULT_CONNECTION_LOSS_DB = 0.2;
 /** OLT launch power used only when the PON port has no measured output. */
 export const DEFAULT_OLT_TX_DBM = 3;
 /** Below this remaining margin the link is flagged as marginal. */

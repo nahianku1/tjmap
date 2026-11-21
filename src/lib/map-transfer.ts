@@ -239,7 +239,7 @@ function toPayload(endpoint: { kind: DeviceKind; id: string }) {
 export async function importMapTransfer(
   file: MapTransferFile,
   targetAreaId: string | null,
-  existing: { tjs: Tj[]; olts: Olt[] },
+  existing: { tjs: Tj[]; olts: Olt[]; onus?: Onu[]; links?: FibreLink[] },
   options: MapImportOptions = {},
   onProgress?: (message: string) => void,
 ): Promise<MapImportResult> {
@@ -265,20 +265,32 @@ export async function importMapTransfer(
   // In replace mode the current map's own codes are freed by the deletion below.
   const currentTjIds = new Set(current.tjs.map((tj) => tj.id));
   const currentOltIds = new Set(current.olts.map((olt) => olt.id));
-  const usedTjCodes = new Set(
-    existing.tjs
+  const currentOnuIds = new Set((current.onus ?? []).map((onu) => onu.id));
+  // Device codes share one network-wide namespace across TJs, OLTs and ONUs.
+  const usedDeviceCodes = new Set([
+    ...existing.tjs
       .filter((tj) => !replacing || !currentTjIds.has(tj.id))
       .map((tj) => tj.code.trim().toLowerCase()),
-  );
-  const usedOltCodes = new Set(
-    existing.olts
+    ...existing.olts
       .filter((olt) => !replacing || !currentOltIds.has(olt.id))
       .map((olt) => olt.code.trim().toLowerCase()),
-  );
+    ...(existing.onus ?? [])
+      .filter((onu) => !replacing || !currentOnuIds.has(onu.id))
+      .map((onu) => onu.username.trim().toLowerCase()),
+  ]);
   const usedOltNames = new Set(
     existing.olts
       .filter((olt) => !replacing || !currentOltIds.has(olt.id))
       .map((olt) => olt.name.trim().toLowerCase()),
+  );
+  // Fibre IDs are unique across every link on the network; in replace mode the
+  // links being deleted free their IDs for reuse.
+  const currentLinkIds = new Set((current.links ?? []).map((link) => link.id));
+  const usedFibreIds = new Set(
+    (existing.links ?? current.links ?? [])
+      .filter((link) => !replacing || !currentLinkIds.has(link.id))
+      .map((link) => link.fibreId.trim().toLowerCase())
+      .filter(Boolean),
   );
 
   /** Keeps the code/name when free, otherwise appends 2, 3, … until it is. */
@@ -325,7 +337,7 @@ export async function importMapTransfer(
   const idMap = options.sharedIdMap ?? new Map<string, string>();
 
   for (const olt of file.olts) {
-    const code = uniqueValue(olt.code, usedOltCodes, 'code', 40);
+    const code = uniqueValue(olt.code, usedDeviceCodes, 'code', 40);
     const name = uniqueValue(olt.name, usedOltNames, 'name', 80);
     if (code !== olt.code.trim() || name !== olt.name.trim()) renamed += 1;
     onProgress?.(`Creating OLT ${code}…`);
@@ -355,7 +367,7 @@ export async function importMapTransfer(
   }
 
   for (const tj of file.tjs) {
-    const code = uniqueValue(tj.code, usedTjCodes, 'code', 40);
+    const code = uniqueValue(tj.code, usedDeviceCodes, 'code', 40);
     if (code !== tj.code.trim()) renamed += 1;
     onProgress?.(`Creating joint ${code}…`);
     const created = await api.createTj({
@@ -394,12 +406,13 @@ export async function importMapTransfer(
   }
 
   for (const onu of file.onus) {
-    onProgress?.(`Creating ONU ${onu.username}…`);
+    const username = uniqueValue(onu.username, usedDeviceCodes, 'code', 80);
+    if (username !== onu.username.trim()) renamed += 1;
+    onProgress?.(`Creating ONU ${username}…`);
     const created = await api.createOnu({
-      username: onu.username,
+      username,
       fibreId: onu.fibreId,
       macAddress: onu.macAddress ?? undefined,
-      vlanId: onu.vlanId ?? null,
       ponType: onu.ponType,
       onuClass: onu.onuClass,
       areaId: targetAreaId,
@@ -423,11 +436,13 @@ export async function importMapTransfer(
       continue;
     }
 
-    onProgress?.(`Creating link ${link.fibreId}…`);
+    const fibreId = uniqueValue(link.fibreId, usedFibreIds, 'code', 80);
+    if (fibreId !== link.fibreId.trim()) renamed += 1;
+    onProgress?.(`Creating link ${fibreId}…`);
     await api.createLink({
       ...fromPayload({ kind: from.kind, id: fromId }),
       ...toPayload({ kind: to.kind, id: toId }),
-      fibreId: link.fibreId,
+      fibreId,
       cableType: link.cableType ?? undefined,
       fromCoreLabel: link.fromCoreLabel ?? null,
       toCoreLabel: link.toCoreLabel ?? null,
@@ -435,9 +450,9 @@ export async function importMapTransfer(
       status: link.status ?? 'active',
       subAreaId: targetSubAreaId,
       notes: link.notes ?? undefined,
-      attenuationDbPerKm: link.attenuationDbPerKm ?? 0.35,
+      attenuationDbPerKm: link.attenuationDbPerKm ?? 0.5,
       spliceCount: link.spliceCount ?? 2,
-      connectionLossDb: link.connectionLossDb ?? 1,
+      connectionLossDb: link.connectionLossDb ?? 0.2,
       color: link.color ?? null,
       cores: (link.cores ?? []).map((core, index) => ({
         index: core.index ?? index + 1,

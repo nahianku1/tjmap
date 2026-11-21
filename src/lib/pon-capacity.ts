@@ -15,6 +15,21 @@ export function ponOnuCapacity(oltType?: string | null): number {
   return PON_ONU_LIMITS[(oltType ?? '').trim().toLowerCase()] ?? DEFAULT_PON_ONU_LIMIT;
 }
 
+export type PonFamily = 'epon' | 'gpon' | 'both';
+
+/** EPON is IEEE, GPON and XG(S)-PON are ITU; a combo cabinet carries both. */
+export function ponOltFamily(oltType?: string | null): PonFamily {
+  const type = (oltType ?? '').trim().toLowerCase();
+  if (type === 'epon') return 'epon';
+  if (type === 'combo') return 'both';
+  return 'gpon';
+}
+
+/** The PON standard an ONU is built for. */
+export function ponOnuFamily(ponType?: string | null): 'epon' | 'gpon' {
+  return (ponType ?? '').trim().toLowerCase() === 'epon' ? 'epon' : 'gpon';
+}
+
 export interface PonPortOccupancy {
   onus: number;
   capacity: number;
